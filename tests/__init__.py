@@ -1,2 +1,1 @@
-"""Tests for SABEL Phase 1."""
-
+"""No-network, no-side-effect tests for SABEL's hybrid architecture."""

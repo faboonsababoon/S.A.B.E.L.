@@ -1,26 +1,34 @@
-"""Unit tests for environment-based Phase 2 configuration."""
-
 import unittest
 
-from sabel.config import DEFAULT_MODEL, load_settings
+from sabel.config import load_settings
 
 
-class SettingsTests(unittest.TestCase):
-    def test_uses_default_model(self) -> None:
-        settings = load_settings({"OPENAI_API_KEY": "test-key"})
-        self.assertEqual(settings.model, DEFAULT_MODEL)
+class ConfigTests(unittest.TestCase):
+    def test_defaults(self):
+        settings = load_settings({})
+        self.assertEqual(settings.ollama_model, "qwen3:1.7b")
+        self.assertEqual(settings.cloud_mode, "ask")
+        self.assertEqual(settings.openai_model, "gpt-5.6-luna")
 
-    def test_uses_configured_model(self) -> None:
+    def test_environment_and_cli_override(self):
         settings = load_settings(
             {
-                "OPENAI_API_KEY": "test-key",
-                "SABEL_OPENAI_MODEL": "example-model",
-            }
+                "OLLAMA_MODEL": "local-test",
+                "SABEL_CLOUD_MODE": "off",
+                "OPENAI_MODEL": "cloud-test",
+                "SABEL_HISTORY_LIMIT": "4",
+            },
+            cloud_mode="auto",
+            debug=True,
         )
-        self.assertEqual(settings.model, "example-model")
+        self.assertEqual(settings.ollama_model, "local-test")
+        self.assertEqual(settings.cloud_mode, "auto")
+        self.assertEqual(settings.history_limit, 4)
+        self.assertTrue(settings.debug)
 
-    def test_missing_key_is_recorded_without_crashing(self) -> None:
-        self.assertIsNone(load_settings({}).api_key)
+    def test_invalid_cloud_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            load_settings({"SABEL_CLOUD_MODE": "always"})
 
 
 if __name__ == "__main__":
