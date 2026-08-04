@@ -12,7 +12,7 @@ Terminal command execution.
 ## Project structure
 
 ```text
-sabel/
+S.A.B.E.L./
 ├── README.md                 Project guide
 ├── main.py                   CLI entry point and command loop
 ├── sabel/
@@ -36,7 +36,7 @@ Requirements: macOS and Python 3. No external packages are needed.
 In Terminal, move into this project directory and run:
 
 ```bash
-cd /Users/fabeun/Documents/Codex/2026-08-03/con/sabel
+cd /Users/fabeun/Documents/S.A.B.E.L.
 python3 main.py
 ```
 
@@ -134,4 +134,3 @@ The model could translate natural language into a structured tool call such as
 `open_website(address="youtube.com")`. SABEL should still validate that structure
 and send it through the same small approved action layer. The model would decide
 which offered tool to request; it would not receive unrestricted Terminal access.
-
