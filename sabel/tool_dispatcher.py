@@ -6,7 +6,12 @@ from typing import Any, Callable, Dict, Optional, Set
 from sabel import actions
 from sabel.actions import ActionResult, normalize_website
 from sabel.config import Settings
-from sabel.confirmations import TRASH_WARNING, is_explicit_trash_confirmation
+from sabel.confirmations import (
+    TRASH_DESCRIPTION,
+    TRASH_WARNING,
+    is_explicit_trash_confirmation,
+    normalize_confirmation_arguments,
+)
 from sabel.conversation_state import ConversationState
 
 
@@ -24,6 +29,7 @@ class DispatchResult:
     delegation: Optional[DelegationRequest] = None
     selected_tool: Optional[str] = None
     validated_arguments: Optional[Dict[str, Any]] = None
+    continue_with_new_request: bool = False
 
 
 def _valid_keys(arguments: Dict[str, Any], required: Set[str], optional=None) -> bool:
@@ -51,8 +57,6 @@ class ToolDispatcher:
         }
 
     def dispatch(self, name: str, arguments: Dict[str, Any], user_text: str) -> DispatchResult:
-        if self.state.pending_action:
-            return self._dispatch_confirmation(name, arguments, user_text)
         if not isinstance(arguments, dict):
             return DispatchResult("SABEL rejected malformed tool arguments.")
 
@@ -74,7 +78,12 @@ class ToolDispatcher:
         if name == "empty_trash":
             if arguments:
                 return DispatchResult("The empty_trash tool accepts no arguments.")
-            self.state.set_pending("empty_trash")
+            self.state.set_pending(
+                "empty_trash",
+                {},
+                description=TRASH_DESCRIPTION,
+                warning=TRASH_WARNING,
+            )
             return DispatchResult(TRASH_WARNING, selected_tool=name, validated_arguments={})
         if name == "show_capabilities":
             if arguments:
@@ -142,16 +151,59 @@ class ToolDispatcher:
         result = handler(value)
         return DispatchResult(result.message, selected_tool=name, validated_arguments={key: value})
 
-    def _dispatch_confirmation(self, name: str, arguments: Dict[str, Any], user_text: str) -> DispatchResult:
-        if arguments:
-            return DispatchResult("Confirmation tools accept no arguments.")
+    def dispatch_pending(
+        self, name: str, arguments: Dict[str, Any], user_text: str
+    ) -> DispatchResult:
+        """Handle only a decision produced by the dedicated pending interpreter."""
+        pending = self.state.pending_action
+        if pending is None:
+            return DispatchResult("There is no pending action to handle.")
         if name == "cancel_pending_action":
+            if arguments:
+                return DispatchResult("The cancellation tool accepts no arguments.")
             self.state.clear_pending()
             return DispatchResult("Trash emptying cancelled.", selected_tool=name, validated_arguments={})
+        if name == "explain_pending_action":
+            if arguments:
+                return DispatchResult("The explanation tool accepts no arguments.")
+            return DispatchResult(
+                pending.description,
+                selected_tool=name,
+                validated_arguments={},
+            )
+        if name == "route_new_request":
+            if arguments:
+                return DispatchResult("The new-request tool accepts no arguments.")
+            self.state.clear_pending()
+            return DispatchResult(
+                "Cancelled the pending Trash action.",
+                selected_tool=name,
+                validated_arguments={},
+                continue_with_new_request=True,
+            )
         if name != "confirm_pending_action":
-            return DispatchResult("Only confirmation or cancellation is allowed while Trash emptying is pending.")
+            return DispatchResult("SABEL rejected an unknown pending-action tool request.")
+
+        normalized = normalize_confirmation_arguments(arguments, pending.tool_name)
+        if normalized is None:
+            return DispatchResult(
+                "The confirmation arguments were rejected; the pending action was not executed."
+            )
         if not is_explicit_trash_confirmation(user_text):
             return DispatchResult(TRASH_WARNING)
-        self.state.clear_pending()
-        result = self.handlers["empty_trash"]()
-        return DispatchResult(result.message, selected_tool=name, validated_arguments={})
+
+        handler = self.handlers.get(pending.tool_name)
+        if handler is None:
+            self.state.clear_pending()
+            return DispatchResult("The stored pending action is no longer available.")
+        try:
+            result = handler(**pending.arguments)
+        except Exception:
+            result = ActionResult(False, "I could not empty Trash because macOS denied the operation.")
+        finally:
+            self.state.clear_pending()
+        return DispatchResult(
+            result.message,
+            selected_tool=name,
+            validated_arguments=normalized,
+        )

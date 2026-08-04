@@ -180,6 +180,24 @@ This repository was verified with Ollama CLI 0.32.5 and `qwen3:1.7b` installed.
 The `ollama pull` step is still required once on any new Mac that does not already
 have that model.
 
+## Secure OpenAI key setup
+
+The recommended setup stores the API key in the encrypted macOS Keychain. Run
+this once after creating or rotating the key:
+
+```bash
+python3 main.py --store-openai-key
+```
+
+The two prompts hide terminal input. SABEL sends the secret to the macOS
+`security` utility over standard input, so the key is not placed in source code,
+shell history, or command-line process arguments. Subsequent SABEL runs retrieve
+the Keychain entry automatically. macOS may request permission to access the item.
+
+If `OPENAI_API_KEY` is explicitly exported, it takes precedence over Keychain.
+This remains useful for temporary development environments, but Keychain is the
+recommended persistent setup on a personal Mac.
+
 ## Environment variables
 
 `.env.example` contains placeholders and defaults. SABEL uses ordinary environment
@@ -191,7 +209,8 @@ Local settings:
 export OLLAMA_MODEL="qwen3:1.7b"
 export OLLAMA_BASE_URL="http://localhost:11434"
 export OLLAMA_KEEP_ALIVE="1m"
-export SABEL_HISTORY_LIMIT="6"
+export SABEL_HISTORY_LIMIT="10"
+export SABEL_PENDING_ACTION_TTL="60"
 ```
 
 - `OLLAMA_MODEL` selects the local router model.
@@ -199,10 +218,13 @@ export SABEL_HISTORY_LIMIT="6"
 - `OLLAMA_KEEP_ALIVE` controls how long Ollama keeps the model loaded after a
   request. The API request passes this setting directly.
 - `SABEL_HISTORY_LIMIT` bounds recent message context so it cannot grow forever.
+- `SABEL_PENDING_ACTION_TTL` cancels an unconfirmed destructive action after the
+  configured number of seconds.
 
 Cloud settings:
 
 ```bash
+# Optional override; normally store the key in Keychain instead.
 export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_MODEL="gpt-5.6-luna"
 export OPENAI_MAX_OUTPUT_TOKENS="2000"
@@ -210,8 +232,9 @@ export OPENAI_REQUEST_TIMEOUT="60"
 export SABEL_CLOUD_MODE="ask"
 ```
 
-Never place a real API key in source, `.env.example`, screenshots, tests, or
-logs. `.env` and `.venv/` are ignored by Git.
+Never place a real API key in source, `.env.example`, screenshots, chats, tests,
+or logs. `.env` and `.venv/` are ignored by Git. If a key is accidentally shared,
+revoke it and store a new one with `--store-openai-key`.
 
 ## Cloud modes
 
@@ -264,15 +287,29 @@ dumps, passwords, hidden reasoning, or sensitive files.
 `Clear my Trash` does not empty anything. It creates a pending action and warns
 that deletion is permanent.
 
-The next response goes through Ollama again with only confirmation and cancellation
-tools visible. Python then applies a second conservative rule: confirmation must
-both clearly assent and name the Trash action. For example:
+Before ordinary routing, the next response goes through a dedicated pending-action
+interpreter with confirmation, cancellation, explanation, and new-request outcomes.
+Recent user and SABEL messages are included, so contextual replies work. Python
+then applies a second conservative safety rule. Clear confirmations include:
 
 ```text
 Yes, empty the Trash.
+Yes, do it.
+Go ahead.
+Proceed.
+I confirm.
 ```
 
-Vague `okay` is rejected. `Never mind` cancels and clears the pending action.
+Vague `okay`, `maybe`, and `sure` remain pending. `Never mind`, `Cancel`, and
+`Do not delete it` cancel and clear the action. Questions such as `What does that
+mean?` explain the permanent deletion warning without clearing it. An unrelated
+command cancels the pending action before normal routing. Pending actions also
+expire after 60 seconds by default.
+
+The model-facing pending tools take zero arguments. Python retains the original
+reviewed tool name and arguments. A specifically documented redundant `action`
+or `tool_name` field is discarded only when it exactly matches the stored tool;
+unknown confirmation fields are rejected without executing anything.
 
 Only after both checks does SABEL run one fixed, reviewed Finder instruction:
 

@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import Mock
 
 from sabel.conversation_state import ConversationState
-from sabel.local_router import LocalRouter
+from sabel.confirmations import TRASH_DESCRIPTION, TRASH_WARNING
+from sabel.local_router import LocalRouter, PendingActionRouter
 from sabel.ollama_client import LocalToolCall, OllamaResponse
 
 
@@ -37,15 +38,81 @@ class LocalRouterTests(unittest.TestCase):
 
     def test_pending_action_uses_confirmation_tools_only(self):
         state = ConversationState(6)
-        state.set_pending("empty_trash")
+        state.set_pending(
+            "empty_trash", {}, TRASH_DESCRIPTION, TRASH_WARNING
+        )
         client = Mock()
         client.chat.return_value = OllamaResponse("", [LocalToolCall("cancel_pending_action", {})], 1.0)
-        LocalRouter(client, state).route("Never mind")
+        PendingActionRouter(client, state).route("Never mind")
         tools = client.chat.call_args.args[1]
         names = [tool["function"]["name"] for tool in tools]
-        self.assertEqual(names, ["confirm_pending_action", "cancel_pending_action"])
+        self.assertEqual(
+            names,
+            [
+                "confirm_pending_action",
+                "cancel_pending_action",
+                "explain_pending_action",
+                "route_new_request",
+            ],
+        )
+        for tool in tools:
+            parameters = tool["function"]["parameters"]
+            self.assertEqual(parameters["properties"], {})
+            self.assertEqual(parameters["required"], [])
+
+    def test_pending_router_receives_previous_assistant_response(self):
+        state = ConversationState(10)
+        state.add_exchange("Clear my Trash", TRASH_WARNING)
+        state.set_pending(
+            "empty_trash", {}, TRASH_DESCRIPTION, TRASH_WARNING
+        )
+        client = Mock()
+        client.chat.return_value = OllamaResponse(
+            "", [LocalToolCall("explain_pending_action", {})], 1.0
+        )
+
+        PendingActionRouter(client, state).route("what does that mean")
+
+        messages = client.chat.call_args.args[0]
+        self.assertTrue(
+            any(
+                message["role"] == "assistant"
+                and message["content"] == TRASH_WARNING
+                for message in messages
+            )
+        )
+
+    def test_pending_safety_reconciliation_handles_small_model_misses(self):
+        examples = [
+            (
+                "what does that mean",
+                OllamaResponse('{"name":"explain_pending_action","arguments":{}}', [], 1.0),
+                "explain_pending_action",
+            ),
+            (
+                "Open YouTube instead",
+                OllamaResponse("Confirm pending action: Open YouTube instead", [], 1.0),
+                "route_new_request",
+            ),
+            (
+                "okay",
+                OllamaResponse("", [LocalToolCall("confirm_pending_action", {})], 1.0),
+                None,
+            ),
+        ]
+        for text, response, expected_tool in examples:
+            with self.subTest(text=text):
+                state = ConversationState(10)
+                state.set_pending(
+                    "empty_trash", {}, TRASH_DESCRIPTION, TRASH_WARNING
+                )
+                client = Mock()
+                client.chat.return_value = response
+                decision = PendingActionRouter(client, state).route(text)
+                self.assertEqual(decision.tool_name, expected_tool)
+                if text == "okay":
+                    self.assertIn("permanently", decision.message)
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -74,8 +74,22 @@ LOCAL_TOOLS: List[Dict[str, Any]] = [
 
 
 PENDING_CONFIRMATION_TOOLS = [
-    _tool("confirm_pending_action", "Confirm the pending Trash action only after an explicit confirmation naming the action."),
-    _tool("cancel_pending_action", "Cancel the pending destructive action."),
+    _tool(
+        "confirm_pending_action",
+        "Confirm the stored pending action after a clear contextual affirmation. Pass exactly {} because Python already owns the action and arguments.",
+    ),
+    _tool(
+        "cancel_pending_action",
+        "Cancel the stored pending action after a refusal or cancellation. Pass exactly {}.",
+    ),
+    _tool(
+        "explain_pending_action",
+        "Explain the warning, permanence, or reason confirmation is required. Pass exactly {} and keep the action pending.",
+    ),
+    _tool(
+        "route_new_request",
+        "The message is an unrelated new command, not confirmation, cancellation, or a question about the pending action. Pass exactly {}.",
+    ),
 ]
 
 
@@ -93,7 +107,11 @@ Return one brief clarification only when intent or a required target is genuinel
 Do not reveal reasoning."""
 
 
-PENDING_SYSTEM_PROMPT = """A destructive Trash action is pending.
-Use confirm_pending_action only for an explicit confirmation that clearly names emptying/clearing/deleting the Trash.
-Use cancel_pending_action for cancellation. Vague assent such as 'okay' is not confirmation.
-Ask briefly for explicit confirmation if unclear. Do not reveal reasoning."""
+PENDING_SYSTEM_PROMPT = """You interpret replies while one destructive action is pending.
+Return exactly one native tool call with an empty arguments object.
+Use confirm_pending_action for a clear contextual confirmation such as yes/do it, go ahead, proceed, I confirm, or permanently delete it.
+Use cancel_pending_action for no, cancel, never mind, stop, or instructions not to delete.
+Use explain_pending_action for questions about the warning, action, permanence, confirmation, or previous SABEL message.
+Use route_new_request for an unrelated command that should replace the pending action.
+Bare okay, maybe, or sure is uncertain: ask for a clearer confirmation in ordinary prose and keep the action pending.
+Never regenerate the pending action name or arguments. Do not reveal reasoning."""

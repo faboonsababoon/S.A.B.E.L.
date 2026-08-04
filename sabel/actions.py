@@ -146,4 +146,4 @@ def empty_trash(run_command: RunCommand = subprocess.run) -> ActionResult:
     if completed.returncode != 0:
         detail = completed.stderr.strip() or "unknown macOS error"
         return ActionResult(False, f"Trash could not be emptied: {detail}")
-    return ActionResult(True, "Trash emptied.")
+    return ActionResult(True, "Trash emptied successfully.")

@@ -18,6 +18,25 @@ class ConversationStateTests(unittest.TestCase):
         state.store_research("new", ["https://new.example"])
         self.assertEqual(state.research_sources, ["https://new.example"])
 
+    def test_pending_action_is_structured_and_expires(self):
+        state = ConversationState(10, pending_action_ttl=60)
+        state.set_pending(
+            "empty_trash",
+            {"original": "argument"},
+            "description",
+            "warning",
+            created_at=100.0,
+        )
+        pending = state.pending_action
+        self.assertEqual(pending.tool_name, "empty_trash")
+        self.assertEqual(pending.arguments, {"original": "argument"})
+        self.assertEqual(pending.description, "description")
+        self.assertEqual(pending.warning, "warning")
+        self.assertFalse(state.pending_expired(now=159.9))
+        expired = state.clear_expired_pending(now=160.0)
+        self.assertEqual(expired.tool_name, "empty_trash")
+        self.assertIsNone(state.pending_action)
+
 
 if __name__ == "__main__":
     unittest.main()

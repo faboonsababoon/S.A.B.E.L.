@@ -93,6 +93,7 @@ class OpenAIResearchService:
                 "Cloud research is unavailable because the OpenAI package is missing."
             ) from error
         self._client = OpenAI(
+            api_key=self.settings.openai_api_key,
             max_retries=0,
             timeout=self.settings.openai_request_timeout,
         )
@@ -135,4 +136,3 @@ class OpenAIResearchService:
             (time.perf_counter() - started) * 1000,
             getattr(response, "usage", None),
         )
-

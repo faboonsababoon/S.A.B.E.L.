@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from sabel.config import Settings
 from sabel.errors import CloudResearchError
@@ -8,6 +8,16 @@ from sabel.openai_research import OpenAIResearchService
 
 
 class OpenAIResearchTests(unittest.TestCase):
+    def test_keychain_value_is_passed_to_lazy_client(self):
+        constructor = Mock(return_value=Mock())
+        fake_openai = SimpleNamespace(OpenAI=constructor)
+        service = OpenAIResearchService(Settings(openai_api_key="sk-keychain-test"))
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            service._get_client()
+
+        self.assertEqual(constructor.call_args.kwargs["api_key"], "sk-keychain-test")
+
     def test_uses_web_search_and_extracts_sources(self):
         source = SimpleNamespace(url="https://example.com/source")
         output = [SimpleNamespace(type="web_search_call", action=SimpleNamespace(sources=[source]))]
@@ -44,4 +54,3 @@ class OpenAIResearchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -33,21 +33,78 @@ class ToolDispatcherTests(unittest.TestCase):
     def test_trash_requires_explicit_second_confirmation(self):
         warning = self.dispatcher.dispatch("empty_trash", {}, "Clear my Trash")
         self.assertIn("permanently", warning.message)
+        self.assertEqual(self.state.pending_action.tool_name, "empty_trash")
         self.handlers["empty_trash"].assert_not_called()
 
-        vague = self.dispatcher.dispatch("confirm_pending_action", {}, "okay")
-        self.assertIn("explicitly", vague.message)
+        vague = self.dispatcher.dispatch_pending("confirm_pending_action", {}, "okay")
+        self.assertIn("continue", vague.message)
         self.handlers["empty_trash"].assert_not_called()
 
-        confirmed = self.dispatcher.dispatch("confirm_pending_action", {}, "Yes, empty the Trash")
+        confirmed = self.dispatcher.dispatch_pending("confirm_pending_action", {}, "Yes, empty the Trash")
         self.assertEqual(confirmed.message, "Trash emptied.")
         self.handlers["empty_trash"].assert_called_once()
+        self.assertIsNone(self.state.pending_action)
 
     def test_cancellation_clears_pending_action(self):
         self.dispatcher.dispatch("empty_trash", {}, "Clear Trash")
-        result = self.dispatcher.dispatch("cancel_pending_action", {}, "Never mind")
+        result = self.dispatcher.dispatch_pending("cancel_pending_action", {}, "Never mind")
         self.assertIn("cancelled", result.message)
         self.assertIsNone(self.state.pending_action)
+
+    def test_explanation_keeps_pending_action(self):
+        self.dispatcher.dispatch("empty_trash", {}, "Clear Trash")
+        result = self.dispatcher.dispatch_pending(
+            "explain_pending_action", {}, "Why do I need to confirm?"
+        )
+        self.assertIn("permanently deletes", result.message)
+        self.assertIsNotNone(self.state.pending_action)
+        self.handlers["empty_trash"].assert_not_called()
+
+    def test_redundant_confirmation_field_is_normalized_but_unknown_is_rejected(self):
+        self.dispatcher.dispatch("empty_trash", {}, "Clear Trash")
+        accepted = self.dispatcher.dispatch_pending(
+            "confirm_pending_action",
+            {"action": "empty_trash"},
+            "Yes, do it",
+        )
+        self.assertEqual(accepted.message, "Trash emptied.")
+        self.handlers["empty_trash"].assert_called_once()
+
+        self.handlers["empty_trash"].reset_mock()
+        self.dispatcher.dispatch("empty_trash", {}, "Clear Trash")
+        rejected = self.dispatcher.dispatch_pending(
+            "confirm_pending_action", {"force": True}, "Yes, do it"
+        )
+        self.assertIn("rejected", rejected.message)
+        self.handlers["empty_trash"].assert_not_called()
+        self.assertIsNotNone(self.state.pending_action)
+
+    def test_confirmation_uses_stored_arguments_and_clears_after_failure(self):
+        handler = Mock(return_value=ActionResult(False, "operation failed"))
+        self.dispatcher.handlers["reviewed_action"] = handler
+        self.state.set_pending(
+            "reviewed_action",
+            {"target": "stored-original"},
+            "description",
+            "warning",
+        )
+
+        result = self.dispatcher.dispatch_pending(
+            "confirm_pending_action", {}, "I confirm"
+        )
+
+        self.assertEqual(result.message, "operation failed")
+        handler.assert_called_once_with(target="stored-original")
+        self.assertIsNone(self.state.pending_action)
+
+    def test_unrelated_request_clears_pending_without_executing(self):
+        self.dispatcher.dispatch("empty_trash", {}, "Clear Trash")
+        result = self.dispatcher.dispatch_pending(
+            "route_new_request", {}, "Open YouTube"
+        )
+        self.assertTrue(result.continue_with_new_request)
+        self.assertIsNone(self.state.pending_action)
+        self.handlers["empty_trash"].assert_not_called()
 
     def test_delegation_is_data_not_a_local_action(self):
         result = self.dispatcher.dispatch(
@@ -77,4 +134,3 @@ class ToolDispatcherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
