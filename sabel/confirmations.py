@@ -22,7 +22,20 @@ def is_explicit_trash_confirmation(user_text: str) -> bool:
     """Apply a conservative deterministic guard after the model selects confirm."""
     lowered = " ".join(user_text.casefold().strip().split())
     cancellation = (
-        lowered in {"no", "no.", "cancel", "cancel.", "stop", "stop.", "never mind", "never mind."}
+        lowered in {
+            "no",
+            "no.",
+            "cancel",
+            "cancel.",
+            "stop",
+            "stop.",
+            "stop action",
+            "stop action.",
+            "never mind",
+            "never mind.",
+            "forget it",
+            "forget it.",
+        }
         or "do not " in lowered
         or "don't " in lowered
     )
@@ -43,7 +56,20 @@ def classify_pending_response(user_text: str) -> Optional[str]:
     """Provide a narrow safety backstop for clear pending-action language."""
     lowered = " ".join(user_text.casefold().strip().split())
     if (
-        lowered in {"no", "no.", "cancel", "cancel.", "stop", "stop.", "never mind", "never mind."}
+        lowered in {
+            "no",
+            "no.",
+            "cancel",
+            "cancel.",
+            "stop",
+            "stop.",
+            "stop action",
+            "stop action.",
+            "never mind",
+            "never mind.",
+            "forget it",
+            "forget it.",
+        }
         or "do not " in lowered
         or "don't " in lowered
     ):

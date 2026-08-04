@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SABEL Browser Copilot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup">
+  <h1>SABEL Browser Copilot</h1>
+  <dl>
+    <dt>Profile</dt><dd id="profile">Not configured</dd>
+    <dt>Connection</dt><dd id="connection">Disconnected</dd>
+    <dt>Allowed sites</dt><dd id="allowed-sites">0</dd>
+    <dt>Current task</dt><dd id="current-task">None</dd>
+  </dl>
+  <p id="error" class="error" hidden></p>
+  <div class="buttons">
+    <button id="stop" class="danger">Stop browser control</button>
+    <button id="reconnect">Reconnect</button>
+    <button id="settings">Open settings</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

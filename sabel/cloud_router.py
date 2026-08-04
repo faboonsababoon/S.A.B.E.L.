@@ -42,8 +42,17 @@ class CloudRouter:
         approval_callback: Optional[Callable[[str], str]] = None,
     ) -> CloudResult:
         if self.settings.cloud_mode == "off":
+            self.state.set_pending_cloud_fallback(
+                request.task,
+                request.task,
+                request.requires_current_web_information,
+            )
             return CloudResult(
-                "Cloud processing is disabled. I can open a normal browser search instead."
+                "This request requires current cloud research, but cloud mode is disabled.\n\n"
+                "I can:\n"
+                "1. Open a browser search.\n"
+                "2. Give general guidance that may be outdated.\n"
+                "3. Cancel."
             )
         if self.settings.cloud_mode == "ask":
             answer = approval_callback(CLOUD_PROMPT) if approval_callback else ""
@@ -73,4 +82,3 @@ class CloudRouter:
             duration_ms=research.duration_ms,
             usage=research.usage,
         )
-

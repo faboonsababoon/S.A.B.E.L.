@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SABEL Browser Copilot settings</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>SABEL Browser Copilot settings</h1>
+    <form id="settings-form">
+      <label>Profile ID
+        <select id="profile-id"><option value="personal">personal</option><option value="nyu">nyu</option></select>
+      </label>
+      <label>Profile display name <input id="profile-name" maxlength="64" required></label>
+      <label>SABEL bridge port <input id="port" type="number" min="1" max="65535" value="8765" required></label>
+      <label>Authentication token
+        <input id="token" type="password" autocomplete="new-password" placeholder="Saved token is hidden">
+      </label>
+      <p id="token-state">No token saved.</p>
+      <button type="button" id="clear-token">Clear token</button>
+      <label>Allowed sites, one domain per line
+        <textarea id="allowed-sites" rows="6" placeholder="youtube.com&#10;google.com"></textarea>
+      </label>
+      <div class="buttons">
+        <button type="submit">Save and request site access</button>
+        <button type="button" id="test">Test connection</button>
+      </div>
+    </form>
+    <p id="status" role="status"></p>
+  </main>
+  <script src="protocol.js"></script>
+  <script src="security.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

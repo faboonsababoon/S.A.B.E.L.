@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "SABEL Browser Copilot",
+  "version": "0.1.0",
+  "description": "Authenticated local browser control for SABEL.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SABEL Browser Copilot"
+  },
+  "options_page": "options.html"
+}

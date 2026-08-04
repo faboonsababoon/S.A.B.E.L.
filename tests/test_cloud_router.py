@@ -17,7 +17,10 @@ class CloudRouterTests(unittest.TestCase):
     def test_off_never_initializes_openai(self):
         factory = Mock()
         result = CloudRouter(Settings(cloud_mode="off"), self.state, factory).handle(self.request)
-        self.assertIn("disabled", result.message)
+        self.assertIn("cloud mode is disabled", result.message)
+        self.assertIn("Open a browser search", result.message)
+        self.assertIn("general guidance", result.message)
+        self.assertIsNotNone(self.state.pending_cloud_fallback)
         factory.assert_not_called()
 
     def test_ask_requires_explicit_approval(self):
@@ -51,4 +54,3 @@ class CloudRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
