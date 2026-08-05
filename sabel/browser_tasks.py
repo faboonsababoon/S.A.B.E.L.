@@ -50,7 +50,17 @@ class BrowserTaskManager:
     def __init__(self, max_steps: int = 8, step_extension: int = 5) -> None:
         self.max_steps = max_steps
         self.step_extension = step_extension
-        self.current_task: Optional[BrowserTask] = None
+        self.current_tasks_by_profile: dict[str, BrowserTask] = {}
+        self._most_recent_profile_id: Optional[str] = None
+
+    @property
+    def current_task(self) -> Optional[BrowserTask]:
+        if self._most_recent_profile_id is None:
+            return None
+        return self.current_tasks_by_profile.get(self._most_recent_profile_id)
+
+    def current_for_profile(self, profile_id: str) -> Optional[BrowserTask]:
+        return self.current_tasks_by_profile.get(profile_id)
 
     def create(
         self,
@@ -70,7 +80,8 @@ class BrowserTaskManager:
             allowed_profiles={profile_id},
             max_steps=self.max_steps,
         )
-        self.current_task = task
+        self.current_tasks_by_profile[profile_id] = task
+        self._most_recent_profile_id = profile_id
         return task
 
     def record_step(self, task: BrowserTask) -> bool:
@@ -113,8 +124,12 @@ class BrowserTaskManager:
         selected = task or self.current_task
         if selected is not None:
             selected.status = BrowserTaskStatus.CANCELLED
-        if selected is self.current_task:
-            self.current_task = None
+            if self.current_tasks_by_profile.get(selected.profile_id) is selected:
+                self.current_tasks_by_profile.pop(selected.profile_id, None)
+        if self._most_recent_profile_id == getattr(selected, "profile_id", None):
+            self._most_recent_profile_id = next(
+                reversed(self.current_tasks_by_profile), None
+            )
 
 
 class BrowserAuditLog:

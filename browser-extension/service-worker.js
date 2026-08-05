@@ -106,6 +106,7 @@ if (typeof importScripts === "function") {
         state.lastError = "The local SABEL bridge could not be reached.";
       };
       socket.onclose = (event = {}) => {
+        if (state.socket !== socket) return;
         state.connected = false;
         state.connecting = false;
         if (state.heartbeatTimer) clearIntervalFn(state.heartbeatTimer);
@@ -113,6 +114,11 @@ if (typeof importScripts === "function") {
         if (event.code === 4001) {
           state.stopped = true;
           state.lastError = `Another extension is already connected as ${state.settings?.profileName || state.settings?.profileId || "this profile"}. Give Personal and NYU different profile IDs, then reconnect.`;
+          return;
+        }
+        if (event.code === 4002) {
+          state.stopped = true;
+          state.lastError = "A newer connection from this extension instance replaced this stale connection. Use Reconnect if this message remains visible.";
           return;
         }
         if (event.code === 4401) {
@@ -154,7 +160,16 @@ if (typeof importScripts === "function") {
         return;
       }
       const command = Protocol.validateCommand(message);
-      if (command.profile_id !== state.settings.profileId) throw new Protocol.ProtocolError("Profile mismatch.");
+      if (command.profile_id !== state.settings.profileId) {
+        const mismatch = Protocol.responseMessage(
+          command,
+          false,
+          {},
+          { code: "PROFILE_MISMATCH", message: "Command profile does not match this extension." }
+        );
+        if (state.socket?.readyState === 1) state.socket.send(JSON.stringify(mismatch));
+        return;
+      }
       let response;
       if (state.stopped && command.action !== "browser_stop_task") {
         response = Protocol.responseMessage(command, false, {}, { code: "CONTROL_STOPPED", message: "Browser control is stopped." });
@@ -179,6 +194,12 @@ if (typeof importScripts === "function") {
 
     function tabMetadata(tab) {
       return { tab_id: tab.id, window_id: tab.windowId, title: String(tab.title || "").slice(0, 300), url: String(tab.url || "").slice(0, 4096), active: Boolean(tab.active) };
+    }
+
+    function navigationMetadata(tab) {
+      const metadata = tabMetadata(tab);
+      const acceptedDestination = String(tab?.pendingUrl || tab?.url || "").slice(0, 4096);
+      return { ...metadata, url: acceptedDestination };
     }
 
     async function focusTabWindow(tab) {
@@ -240,11 +261,18 @@ if (typeof importScripts === "function") {
         const url = await validateDestination(args.url);
         const tab = await chromeApi.tabs.create({ url, active: args.active !== false });
         await focusTabWindow(tab);
-        return tabMetadata(tab);
+        return navigationMetadata(tab);
       }
       if (action === "browser_navigate") {
         const url = await validateDestination(args.url);
-        return tabMetadata(await chromeApi.tabs.update(args.tab_id, { url }));
+        let tab;
+        try {
+          tab = await chromeApi.tabs.update(args.tab_id, { url });
+        } catch (_) {
+          throw Object.assign(new Error("The requested tab is no longer available."), { code: "TAB_NOT_FOUND" });
+        }
+        await focusTabWindow(tab);
+        return navigationMetadata(tab);
       }
       if (action === "browser_activate_tab") {
         const tab = await chromeApi.tabs.update(args.tab_id, { active: true });

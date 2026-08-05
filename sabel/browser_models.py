@@ -24,6 +24,8 @@ class BrowserResult:
     error: Optional[str] = None
     error_code: Optional[str] = None
     request_id: Optional[str] = None
+    profile_id: Optional[str] = None
+    connection_instance_id: Optional[str] = None
 
     @classmethod
     def failed(cls, message: str, code: str) -> "BrowserResult":
@@ -51,6 +53,53 @@ class BrowserProfile:
     instance_id: str
     extension_version: str
     connected_at: float = field(default_factory=time.time)
+
+
+@dataclass(frozen=True)
+class BrowserSearchRequest:
+    """One validated search plan with routing fields kept independent."""
+
+    profile_id: str
+    search_engine: str
+    query: str
+    target_tab_id: Optional[int] = None
+
+
+@dataclass
+class ProfileBrowserState:
+    """Verified browser context belonging to exactly one Chrome profile."""
+
+    profile_id: str
+    active_tab_id: Optional[int] = None
+    last_service: Optional[str] = None
+    last_search_engine: Optional[str] = None
+    last_search_query: Optional[str] = None
+    last_successful_action: Optional[str] = None
+    last_url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class LastBrowserReference:
+    """Most recent verified browser action available to conversational references."""
+
+    profile_id: str
+    service: Optional[str]
+    search_engine: Optional[str]
+    tab_id: Optional[int]
+    completed_at: float
+
+
+@dataclass(frozen=True)
+class BrowserActionContext:
+    """Safe structured evidence carried from execution to session state/debug output."""
+
+    profile_id: str
+    service: Optional[str] = None
+    search_engine: Optional[str] = None
+    query: Optional[str] = None
+    tab_id: Optional[int] = None
+    url: Optional[str] = None
+    connection_instance_id: Optional[str] = None
 
 
 class BrowserTaskStatus(Enum):

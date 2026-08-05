@@ -31,23 +31,32 @@ LOCAL_TOOLS: List[Dict[str, Any]] = [
         ["profile"],
     ),
     _tool(
-        "open_service_in_profile",
-        "Open a reviewed service in its authoritative Chrome profile. Use for YouTube, Albert, Personal Gmail, NYU Gmail, Google, and GitHub. Omit profile when the registry default should apply.",
+        "open_service",
+        "Open a reviewed service in one exact connected Chrome profile. Python resolves the URL; never invent one.",
         {
-            "service": {"type": "string"},
-            "profile": {"type": "string"},
+            "service_name": {"type": "string"},
+            "profile_id": {"type": "string", "enum": ["personal", "nyu"]},
         },
-        ["service"],
+        ["service_name", "profile_id"],
     ),
     _tool(
-        "browser_search",
-        "Open a YouTube or Google search in a named Chrome profile. This opens results and does not claim the desired result was selected.",
+        "search_web",
+        "Search Google, Bing, or DuckDuckGo in one exact connected Chrome profile. Keep the literal query separate from engine and profile routing.",
         {
-            "service": {"type": "string"},
             "query": {"type": "string"},
-            "profile": {"type": "string"},
+            "search_engine": {"type": "string", "enum": ["google", "bing", "duckduckgo", "default"]},
+            "profile_id": {"type": "string", "enum": ["personal", "nyu"]},
         },
-        ["service", "query"],
+        ["query", "search_engine", "profile_id"],
+    ),
+    _tool(
+        "search_youtube",
+        "Search YouTube in one exact connected Chrome profile. Keep the literal query separate from profile routing.",
+        {
+            "query": {"type": "string"},
+            "profile_id": {"type": "string", "enum": ["personal", "nyu"]},
+        },
+        ["query", "profile_id"],
     ),
     _tool(
         "browser_copilot_task",
@@ -66,15 +75,6 @@ LOCAL_TOOLS: List[Dict[str, Any]] = [
     _tool(
         "show_recent_browser_actions",
         "Show a concise bounded security audit summary of recent browser actions.",
-    ),
-    _tool(
-        "open_service",
-        "Open the reviewed homepage for a well-known service such as YouTube, Google, or GitHub. Use this for natural service navigation; Python resolves the URL.",
-        {
-            "service_name": {"type": "string"},
-            "browser": {"type": "string"},
-        },
-        ["service_name"],
     ),
     _tool(
         "open_website",
@@ -200,9 +200,10 @@ If a requested action such as playing media is ambiguous and no exact supported 
 Use get_trash_status only for Trash contents. Use show_status only for SABEL runtime configuration.
 Use show_browser_profiles for connected Chrome profiles, stop_browser_task to stop browser control, and show_recent_browser_actions for the local browser audit summary.
 Use open_web_search for raw browser results and delegate_to_openai for current research, comparison, recommendation, or synthesis.
-Use open_service_in_profile for registered services with Personal/NYU routing. Use browser_copilot_task for a named YouTube channel, browser_search for raw YouTube/Google results, open_website only for an explicit URL, and open_spotify_search for a confirmed Spotify search.
+For browser work, keep profile, provider, query, service, and tab context in separate fields. Profile and provider instructions are never part of a search query. Explicit values in the current user message override prior context. Google means web search unless the user explicitly says Google Chrome. YouTube means YouTube search when a query is present. Never reuse an old query or a previously used profile when the user names a new value.
+Use open_service for registered services with exact Personal/NYU routing. Use browser_copilot_task for a named YouTube channel, search_web for Google/Bing/DuckDuckGo, search_youtube for YouTube results, open_website only for an explicit URL, and open_spotify_search for a confirmed Spotify search.
 Use show_status for requests about SABEL's health or runtime status, including natural phrasings such as "show your status", "what is your status", "are you working normally", and "show SABEL status". Python generates the values.
-Examples: YouTube homepage -> open_service_in_profile with service "youtube" and profile "personal"; an explicit youtube.com URL -> open_website; emptying Trash -> empty_trash {}; inspecting Trash contents -> get_trash_status {}; a greeting -> normal friendly text; an ambiguous play request -> request_clarification with one concrete question.
+Examples: YouTube homepage -> open_service with service_name "youtube" and profile_id "personal"; Google search in NYU -> search_web with a clean query, search_engine "google", and profile_id "nyu"; YouTube search in Personal -> search_youtube with a clean query and profile_id "personal"; an explicit youtube.com URL -> open_website; emptying Trash -> empty_trash {}; inspecting Trash contents -> get_trash_status {}; a greeting -> normal friendly text; an ambiguous play request -> request_clarification with one concrete question.
 Never invent abilities, tools, shell commands, or hidden results. Do not reveal reasoning."""
 
 

@@ -55,6 +55,18 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_settings({"SABEL_DEFAULT_MUSIC_SERVICE": "anything"})
 
+    def test_default_search_engine_and_reference_ttl_are_validated(self):
+        settings = load_settings(
+            {
+                "SABEL_DEFAULT_SEARCH_ENGINE": "duckduckgo",
+                "SABEL_BROWSER_REFERENCE_TTL": "45",
+            }
+        )
+        self.assertEqual(settings.default_search_engine, "duckduckgo")
+        self.assertEqual(settings.browser_reference_ttl, 45.0)
+        with self.assertRaisesRegex(ValueError, "Default search engine"):
+            load_settings({"SABEL_DEFAULT_SEARCH_ENGINE": "youtube"})
+
     def test_invalid_browser_profile_and_albert_url_are_rejected(self):
         with self.assertRaises(ValueError):
             load_settings({"SABEL_DEFAULT_GMAIL_PROFILE": "work"})

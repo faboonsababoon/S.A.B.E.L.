@@ -124,13 +124,13 @@ intent. It can request these local tools:
 
 - `show_browser_profiles`
 - `show_browser_tabs`
-- `open_service_in_profile`
-- `browser_search`
+- `open_service`
+- `search_web`
+- `search_youtube`
 - `browser_copilot_task`
 - `stop_browser_task`
 - `show_recent_browser_actions`
 - `open_website`
-- `open_service`
 - `open_application`
 - `open_spotify_search`
 - `open_youtube_search`
@@ -205,6 +205,7 @@ S.A.B.E.L./
 │   ├── browser_models.py         Profile, result, task, and audit types
 │   ├── browser_policy.py         Scope and prompt-injection policy
 │   ├── browser_protocol.py       Strict versioned bridge schemas
+│   ├── browser_routing.py        Search slots, URL building, and verification
 │   ├── browser_runtime.py        Background async bridge runtime
 │   ├── browser_security.py       Token, origin, URL, and rate limits
 │   ├── browser_tasks.py          Python-owned task and audit state
@@ -320,7 +321,9 @@ export OLLAMA_KEEP_ALIVE="1m"
 export SABEL_HISTORY_LIMIT="10"
 export SABEL_PENDING_ACTION_TTL="60"
 export SABEL_CLARIFICATION_TTL="60"
+export SABEL_BROWSER_REFERENCE_TTL="300"
 export SABEL_DEFAULT_MUSIC_SERVICE="spotify"
+export SABEL_DEFAULT_SEARCH_ENGINE="google"
 export SABEL_BROWSER_BRIDGE_PORT="8765"
 export SABEL_BROWSER_MAX_ACTIONS="8"
 export SABEL_CONFIG_DIR="$HOME/.sabel"
@@ -337,6 +340,11 @@ export SABEL_DEFAULT_GMAIL_PROFILE="personal"
   configured number of seconds.
 - `SABEL_CLARIFICATION_TTL` clears an unanswered clarification after the
   configured number of seconds.
+- `SABEL_BROWSER_REFERENCE_TTL` limits how long phrases such as `same profile`,
+  `same tab`, and `there` may reuse the latest verified browser result.
+- `SABEL_DEFAULT_SEARCH_ENGINE` may be `google`, `bing`, or `duckduckgo`. Leave
+  it empty to ask when neither the current request nor verified context selects
+  a provider.
 
 Cloud settings:
 
@@ -378,9 +386,13 @@ through the LAN and must never be publicly deployed. Every extension connection
 must have an explicitly registered `chrome-extension://` origin and authenticate
 with a random local token. Messages have a strict versioned schema, 256 KiB size
 limit, bounded queue, rate limit, registration/command timeouts, heartbeats, and
-bounded per-profile concurrency. A reconnecting instance predictably replaces
-the older connection for that same profile. Tokens, page contents, form values,
-cookies, and credentials are never logged.
+bounded per-profile concurrency. The authoritative connection registry is keyed
+by `profile_id`; Personal and NYU therefore remain simultaneous, isolated
+connections. A reconnect from the same stored `instance_id` atomically replaces
+its stale socket. A different extension instance claiming an already-connected
+profile ID is rejected instead of evicting it. Disconnecting either profile does
+not affect the other. Tokens, page contents, form values, cookies, and
+credentials are never logged.
 
 WebSocket was selected for v1 because it gives a small, inspectable localhost
 protocol and allows the extension and Python policy to be tested independently.
@@ -447,6 +459,8 @@ export SABEL_CONFIG_DIR="$HOME/.sabel"
 export SABEL_ALBERT_URL="https://YOUR_REVIEWED_ALBERT_HOST/"
 export SABEL_DEFAULT_GMAIL_PROFILE="personal"  # or nyu
 export SABEL_DEFAULT_MUSIC_SERVICE="spotify"   # or youtube
+export SABEL_DEFAULT_SEARCH_ENGINE="google"    # google, bing, duckduckgo, or unset
+export SABEL_BROWSER_REFERENCE_TTL="300"
 ```
 
 `SABEL_ALBERT_URL` must be a credential-free HTTPS URL. The service registry
@@ -459,6 +473,15 @@ never silently substitutes another account.
 `SABEL_BROWSER_MAX_ACTIONS` configures the initial autonomous-action limit. A
 later direct user approval may extend an active task by five actions; webpage
 content cannot change either limit.
+
+Search routing keeps the Chrome profile, reviewed service, search engine,
+literal query, target tab, and conversational reference as separate values.
+Explicit profile/provider words in the current request win over prior context.
+Python removes routing suffixes from the query, validates every field, constructs
+the provider URL locally, dispatches only to the exact profile connection, and
+verifies the response profile plus resulting URL before updating that profile's
+tab state or reporting success. A failed request never changes the latest
+browser reference.
 
 ### Snapshots, clicks, typing, and verification
 
@@ -616,6 +639,9 @@ python3 main.py --cloud ask --debug
 Debug output may show models, routing mode, durations, and returned token-usage
 metadata. It does not reveal internal tool names, validated argument dictionaries,
 API keys, environment dumps, passwords, hidden reasoning, or sensitive files.
+For a verified browser search it also shows the resolved profile, provider,
+literal query, exact target connection, target tab or `new`, locally generated
+URL, and extension result profile.
 
 ## Destructive Trash confirmation
 
@@ -712,26 +738,91 @@ Local SABEL commands still work normally.
 The local Ollama router and command loop remain active after a cloud failure.
 Exact dollar estimates are intentionally omitted because price and usage vary.
 
-## Run the tests
+## Application and request resolution
+
+Every turn receives a new immutable `ResolvedRequest`. Application, browser,
+service, provider, query, profile, and tab fields remain separate. Before Ollama
+runs, Python locks obvious current-turn constraints such as `NYU`, `Google`,
+quoted text, application wording, corrections, and `do the same`. After Ollama
+returns, Python merges the proposed interpretation with those locks; an explicit
+current-turn field always wins over model output, service defaults, and history.
+
+Application routing does not inherit the last browser profile. SABEL builds a
+cached catalog from `/Applications`, `~/Applications`, `/System/Applications`,
+and `/System/Library/CoreServices`, reading bundle names, display names, and
+identifiers with `plistlib`. Matching is exact first, then token-complete and
+high-confidence. Harmless `studio`/`studios` variation is normalized. A request
+for `Roblox Studio` can therefore select `Roblox Studio`, but can never silently
+fall back to regular `Roblox`, because the meaningful `studio` token is absent.
+Ambiguous or missing applications produce a clarification/not-found message and
+no process is launched. Ollama never receives or chooses bundle paths.
+
+Corrections mark the prior attempt as rejected without reusing it. SABEL stores
+the most recent attempted action separately from the most recent verified
+successful action. `do the same` clones only the latter structured template;
+`do the same on my NYU profile` changes only the profile, and `do the same on
+YouTube` preserves the query while changing the provider. Failed, timed-out,
+unverified, or user-rejected actions never become reusable context.
+
+Media clarification is also structured. `play circles` retains `query=circles`;
+a reply such as `YouTube, on my NYU profile` fills the missing service and profile
+and becomes a NYU YouTube search. Browser state remains isolated per exact
+`personal`/`nyu` WebSocket connection. Every result must match the request ID,
+profile, destination provider, query, and tab before SABEL updates context or
+reports success.
+
+## Complete verification stack
+
+Run every required layer with:
 
 ```bash
 cd /Users/fabeun/Documents/S.A.B.E.L.
-source .venv/bin/activate
-python3 -B -m unittest discover -v
-cd browser-extension
-npm test
+python3 -m sabel.verify
 ```
 
-The suite uses **mocks**—controlled substitutes—for Ollama, OpenAI, macOS `open`,
-and Trash emptying. It contacts neither provider, spends no credits, opens no real
-windows, and deletes nothing.
+The runner uses the project virtual environment when present and reports each
+layer separately:
 
-The Python suite also uses mocked WebSocket clients and temporary token/origin
-files. The extension suite uses Node's built-in test runner with mocked Chrome
-APIs. Manual browser testing is intentionally separate:
+1. Focused unit and property/invariant tests.
+2. Production-router conformance against the real `qwen3:1.7b` Ollama model at
+   temperature zero, repeated three times per critical scenario.
+3. A black-box subprocess test using real stdin/stdout and `main.py`.
+4. Two simultaneous authenticated WebSocket extension simulators, with separate
+   Personal/NYU tab state and exact destination assertions.
+5. A read-only scan of actual installed macOS application bundles.
+6. Chrome-extension JavaScript tests.
+7. An optional live-browser smoke test.
+
+The black-box clients simulate only Chrome. They do not mock the SABEL command
+loop, prompt, model, resolver, state, dispatcher, profile registry, WebSocket
+transport, result verification, or renderer. This is why passing the focused
+mocked tests alone is not treated as proof that production routing works.
+
+The default suite never opens real applications, contacts OpenAI, empties Trash,
+or performs destructive actions. The optional live browser check runs only when
+both real profiles connect to its bridge, opens harmless disposable Google and
+YouTube result tabs, verifies the returned profile and URL, then closes only the
+tabs it created:
 
 ```bash
-cd /Users/fabeun/Documents/S.A.B.E.L.
+python3 -m sabel.self_test --browser-live
+```
+
+When both profiles are unavailable it reports, without calling that a pass:
+
+```text
+Live Chrome acceptance test not run: required profiles were not connected.
+```
+
+The installed-application smoke check is read-only:
+
+```bash
+python3 -m sabel.self_test --applications
+```
+
+For manual extension setup and inspection:
+
+```bash
 open docs/MANUAL_BROWSER_TEST.md
 ```
 

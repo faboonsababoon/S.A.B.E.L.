@@ -9,6 +9,13 @@ the profile ID/name, port, hidden token, and an explicit domain allowlist in the
 options page. Chrome optional host permissions must also be granted for those
 domains. The popup reports connection state and provides an immediate stop.
 
+Each Chrome installation must have a distinct configured identity: Personal uses
+profile ID `personal` and NYU uses `nyu`. A reconnect from the same installation
+replaces only its stale socket. A second extension instance that claims an
+already-connected profile ID is rejected, so a misconfigured NYU installation
+cannot take over Personal. Commands whose `profile_id` does not exactly match the
+receiving extension are returned as `PROFILE_MISMATCH` and are not executed.
+
 Banking, medical, payment, and password-manager domains are intentionally outside
 Browser Copilot v1 scope and are rejected by settings validation. File URLs and
 other non-HTTP(S) schemes are never requested.

@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 from sabel.actions import ActionResult
 from sabel.browser_copilot import BrowserOutcome
-from sabel.browser_models import BrowserActionState
+from sabel.browser_models import BrowserActionContext, BrowserActionState
 from sabel.assistant import AssistantResultType, SabelAssistant
 from sabel.cloud_router import CloudResult, CloudRouter
 from sabel.config import Settings
@@ -511,17 +511,31 @@ class AssistantIntegrationTests(unittest.TestCase):
 
     def test_successful_profile_search_records_context_for_followups(self):
         browser = Mock()
-        browser.browser_search.return_value = BrowserOutcome(
-            BrowserActionState.EXECUTED,
-            "Searching Google for “dancing.”",
+        context = BrowserActionContext(
+            profile_id="personal",
+            service="google",
+            search_engine="google",
+            query="dancing",
+            tab_id=4,
+            url="https://www.google.com/search?q=dancing",
+        )
+        browser.search_web.return_value = BrowserOutcome(
+            BrowserActionState.VERIFIED,
+            "Searching Google for “dancing” in your Personal Chrome profile.",
             True,
+            True,
+            context=context,
         )
         dispatcher = ToolDispatcher(
             self.settings, self.state, lambda: True, self.handlers, browser
         )
         self.local.route.return_value = tool(
-            "browser_search",
-            {"service": "google", "query": "dancing", "profile": "personal"},
+            "search_web",
+            {
+                "query": "dancing",
+                "search_engine": "google",
+                "profile_id": "personal",
+            },
         )
         assistant = SabelAssistant(
             self.settings,
@@ -534,17 +548,29 @@ class AssistantIntegrationTests(unittest.TestCase):
             cloud_router=self.cloud,
         )
         result = assistant.handle("search dancing in Google in Personal")
-        self.assertEqual(result.message, "Searching Google for “dancing.”")
+        self.assertEqual(
+            result.message,
+            "Searching Google for “dancing” in your Personal Chrome profile.",
+        )
         self.assertEqual(self.state.last_browser_service, "google")
         self.assertEqual(self.state.last_browser_profile, "personal")
         self.assertEqual(self.state.last_browser_query, "dancing")
 
     def test_browser_search_clarification_executes_with_stored_query(self):
         browser = Mock()
-        browser.browser_search.return_value = BrowserOutcome(
-            BrowserActionState.EXECUTED,
-            "Searching YouTube for “dancing.”",
+        browser.search_youtube.return_value = BrowserOutcome(
+            BrowserActionState.VERIFIED,
+            "Searching YouTube for “dancing” in your Personal Chrome profile.",
             True,
+            True,
+            context=BrowserActionContext(
+                profile_id="personal",
+                service="youtube",
+                search_engine="youtube",
+                query="dancing",
+                tab_id=5,
+                url="https://www.youtube.com/results?search_query=dancing",
+            ),
         )
         dispatcher = ToolDispatcher(
             self.settings, self.state, lambda: True, self.handlers, browser
@@ -555,8 +581,8 @@ class AssistantIntegrationTests(unittest.TestCase):
             clarification=ClarificationRequest(
                 question="Should I search Google or YouTube for “dancing”?",
                 intent="browser_search",
-                collected_slots={"query": "dancing", "profile": "personal"},
-                missing_slots=["service"],
+                collected_slots={"query": "dancing", "profile_id": "personal"},
+                missing_slots=["search_engine"],
             ),
         )
         self.clarifications.route.return_value = ClarificationReply(
@@ -575,10 +601,11 @@ class AssistantIntegrationTests(unittest.TestCase):
         )
         assistant.handle("search dancing in Personal")
         result = assistant.handle("YouTube")
-        self.assertEqual(result.message, "Searching YouTube for “dancing.”")
-        browser.browser_search.assert_called_once_with(
-            "youtube", "dancing", "personal"
+        self.assertEqual(
+            result.message,
+            "Searching YouTube for “dancing” in your Personal Chrome profile.",
         )
+        browser.search_youtube.assert_called_once_with("dancing", "personal")
 
     def test_verified_browser_outcome_is_rendered_without_internal_values(self):
         browser = Mock()
@@ -613,6 +640,100 @@ class AssistantIntegrationTests(unittest.TestCase):
         self.assertEqual(result.message, "Opened Taz Skylar’s YouTube channel.")
         self.assertNotIn("browser_copilot_task", result.message)
         self.assertEqual(self.state.messages()[-1]["content"], result.message)
+
+    def test_failed_browser_action_does_not_update_reference(self):
+        original = BrowserActionContext(
+            profile_id="nyu",
+            service="youtube",
+            search_engine="youtube",
+            tab_id=7,
+        )
+        self.state.record_verified_browser_context(original)
+        browser = Mock()
+        browser.search_web.return_value = BrowserOutcome(
+            BrowserActionState.FAILED,
+            "The browser command timed out.",
+            False,
+        )
+        dispatcher = ToolDispatcher(
+            self.settings, self.state, lambda: True, self.handlers, browser
+        )
+        self.local.route.return_value = tool(
+            "search_web",
+            {
+                "query": "cats",
+                "search_engine": "google",
+                "profile_id": "personal",
+            },
+        )
+        assistant = SabelAssistant(
+            self.settings,
+            ollama_client=self.ollama,
+            state=self.state,
+            local_router=self.local,
+            pending_router=self.pending,
+            clarification_router=self.clarifications,
+            dispatcher=dispatcher,
+            cloud_router=self.cloud,
+        )
+        assistant.handle("search cats in Google in Personal")
+        reference = self.state.current_browser_reference()
+        self.assertEqual(reference.profile_id, "nyu")
+        self.assertEqual(reference.search_engine, "youtube")
+
+    def test_debug_routing_is_safe_and_history_stores_only_visible_response(self):
+        settings = Settings(debug=True)
+        browser = Mock()
+        context = BrowserActionContext(
+            profile_id="personal",
+            service="google",
+            search_engine="google",
+            query="green water bottles",
+            tab_id=12,
+            url="https://www.google.com/search?q=green+water+bottles",
+        )
+        browser.search_web.return_value = BrowserOutcome(
+            BrowserActionState.VERIFIED,
+            "Searching Google for “green water bottles” in your Personal Chrome profile.",
+            True,
+            True,
+            context=context,
+        )
+        dispatcher = ToolDispatcher(
+            settings, self.state, lambda: True, self.handlers, browser
+        )
+        self.local.route.return_value = tool(
+            "search_web",
+            {
+                "query": "green water bottles",
+                "search_engine": "google",
+                "profile_id": "personal",
+            },
+        )
+        assistant = SabelAssistant(
+            settings,
+            ollama_client=self.ollama,
+            state=self.state,
+            local_router=self.local,
+            pending_router=self.pending,
+            clarification_router=self.clarifications,
+            dispatcher=dispatcher,
+            cloud_router=self.cloud,
+        )
+        result = assistant.handle(
+            'search "green water bottles" in google in my personal profile'
+        )
+        self.assertIn("[debug] Resolved profile: personal", result.message)
+        self.assertIn("[debug] Resolved provider: google", result.message)
+        self.assertIn("[debug] Resolved query: green water bottles", result.message)
+        self.assertIn("[debug] Target connection: personal", result.message)
+        self.assertIn("[debug] Extension result profile: personal", result.message)
+        history = self.state.messages()[-1]["content"]
+        self.assertEqual(
+            history,
+            "Searching Google for “green water bottles” in your Personal Chrome profile.",
+        )
+        self.assertNotIn("search_web", result.message)
 
 
 if __name__ == "__main__":

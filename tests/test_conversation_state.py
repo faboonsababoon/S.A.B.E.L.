@@ -1,6 +1,7 @@
 import unittest
 
 from sabel.conversation_state import ConversationState
+from sabel.browser_models import BrowserActionContext
 
 
 class ConversationStateTests(unittest.TestCase):
@@ -70,14 +71,43 @@ class ConversationStateTests(unittest.TestCase):
 
     def test_validated_browser_context_supports_safe_followups(self):
         state = ConversationState(10)
-        state.record_browser_context("youtube", "personal", "cookies")
+        state.record_verified_browser_context(
+            BrowserActionContext(
+                profile_id="personal",
+                service="youtube",
+                search_engine="youtube",
+                query="cookies",
+                tab_id=7,
+                url="https://www.youtube.com/results?search_query=cookies",
+            )
+        )
         self.assertEqual(state.last_browser_service, "youtube")
         self.assertEqual(state.last_browser_profile, "personal")
         self.assertEqual(state.last_browser_query, "cookies")
-        state.record_browser_context("google", None)
+        state.record_verified_browser_context(
+            BrowserActionContext(
+                profile_id="nyu",
+                service="google",
+                search_engine="google",
+                tab_id=8,
+                url="https://www.google.com/",
+            )
+        )
         self.assertEqual(state.last_browser_service, "google")
-        self.assertIsNone(state.last_browser_profile)
+        self.assertEqual(state.last_browser_profile, "nyu")
         self.assertEqual(state.last_browser_query, "cookies")
+
+    def test_browser_reference_expires_and_failed_actions_cannot_update_it(self):
+        state = ConversationState(10, browser_reference_ttl=60)
+        context = BrowserActionContext(
+            profile_id="nyu",
+            service="youtube",
+            search_engine="youtube",
+            tab_id=9,
+        )
+        state.record_verified_browser_context(context, completed_at=100.0)
+        self.assertEqual(state.current_browser_reference(now=159.9).profile_id, "nyu")
+        self.assertIsNone(state.current_browser_reference(now=160.0))
 
     def test_cloud_fallback_is_structured_and_expires(self):
         state = ConversationState(10, clarification_ttl=60)

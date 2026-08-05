@@ -107,6 +107,13 @@ class BrowserBridgeRuntime:
             return self._unavailable()
         return self._run(self.copilot.open_service(service, profile))
 
+    def open_service(
+        self, service_name: str, profile_id: Optional[str] = None
+    ) -> BrowserOutcome:
+        if not self.started:
+            return self._unavailable()
+        return self._run(self.copilot.open_service(service_name, profile_id))
+
     def show_browser_tabs(self, profile: str) -> BrowserOutcome:
         if not self.started:
             return self._unavailable()
@@ -118,6 +125,20 @@ class BrowserBridgeRuntime:
         if not self.started:
             return self._unavailable()
         return self._run(self.copilot.browser_search(service, query, profile))
+
+    def search_web(
+        self, query: str, search_engine: str, profile_id: str
+    ) -> BrowserOutcome:
+        if not self.started:
+            return self._unavailable()
+        return self._run(
+            self.copilot.search_web(query, search_engine, profile_id)
+        )
+
+    def search_youtube(self, query: str, profile_id: str) -> BrowserOutcome:
+        if not self.started:
+            return self._unavailable()
+        return self._run(self.copilot.search_youtube(query, profile_id))
 
     def browser_copilot_task(
         self, objective: str, service: str, profile: str, approval_callback=None

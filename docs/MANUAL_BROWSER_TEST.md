@@ -5,6 +5,29 @@ real Chrome tabs and uses the Chrome profiles you configure. It does not require
 publishing the extension. Never paste the bridge token into this document, a
 chat, a screenshot, a command argument, or a Git-tracked file.
 
+## Automated production-boundary verification first
+
+Before manual testing, run the complete stack from the repository root:
+
+```bash
+python3 -m sabel.verify
+```
+
+This launches the real SABEL command loop, real local Ollama router, and real
+localhost WebSocket server with two independent protocol simulators. It also
+checks the actual installed-application catalog without opening applications.
+The live portion is clearly marked `SKIPPED` unless both real extension profiles
+connect; a skip is not reported as a live pass.
+
+To run only the explicit safe live check after configuring both extensions:
+
+```bash
+python3 -m sabel.self_test --browser-live
+```
+
+It creates harmless inactive Google and YouTube search tabs in each profile,
+verifies the response profile and URL, and closes only those test tabs.
+
 ## 1. Prepare SABEL and its token
 
 ```bash
@@ -69,6 +92,12 @@ The two installations use distinct `profile_id`, `profile_name`, and
 `instance_id` registrations. SABEL does not inspect cookies or infer account
 identity.
 
+If the NYU popup reports `Personal`, its options are still configured as
+`personal`; change the profile ID to `nyu`, the display name to `NYU`, save, and
+reconnect. Do not connect both installations with the same profile ID. The bridge
+keeps the first distinct instance and rejects the conflicting one instead of
+replacing the correct profile.
+
 ## 4. Start SABEL and confirm both connections
 
 Configure Albert only if you know its exact reviewed HTTPS address:
@@ -91,9 +120,17 @@ Open each extension popup and choose **Reconnect**. Then run:
 SABEL > show browser profiles
 ```
 
-Expected: Personal and NYU are both listed. If one is missing, use that
-installation's **Test connection** button and check its profile, port, token,
-allowed sites, registered extension ID, and permissions.
+Expected, in this stable order:
+
+```text
+Connected browser profiles
+- Personal (personal)
+- NYU (nyu)
+```
+
+If one is missing, use that installation's **Test connection** button and check
+its profile, port, token, allowed sites, registered extension ID, and
+permissions.
 
 ## 5. List tabs without exposing raw protocol data
 
@@ -136,7 +173,48 @@ SABEL > open Gmail
 The first two use their exact profiles. The last asks Personal or NYU unless a
 default was explicitly configured.
 
-## 7. Exercise search, constrained snapshot, click, and verification
+## 7. Run the profile-routing regression sequence
+
+Use these requests in order:
+
+```text
+SABEL > open youtube in nyu profile
+SABEL: Opening YouTube in your NYU Chrome profile.
+
+SABEL > in the same profile, search up "matt rober"
+SABEL: Searching YouTube for “matt rober” in your NYU Chrome profile.
+
+SABEL > now go to google and search up matie stone in my nyu profile
+SABEL: Searching Google for “matie stone” in your NYU Chrome profile.
+
+SABEL > search up matt rober in google in my nyu profile
+SABEL: Searching Google for “matt rober” in your NYU Chrome profile.
+
+SABEL > search "green water bottles" in google in my personal profile
+SABEL: Searching Google for “green water bottles” in your Personal Chrome profile.
+```
+
+Confirm the last Google results tab appears in the Personal Chrome profile, not
+NYU. The NYU YouTube tab may be reused for the first contextual search, but no tab
+from NYU may be reused for the final Personal request.
+
+Restart SABEL with `--debug` and repeat the final request. The routing block must
+contain equivalent values (the tab ID may differ):
+
+```text
+[debug] Resolved profile: personal
+[debug] Resolved provider: google
+[debug] Resolved query: green water bottles
+[debug] Target connection: personal
+[debug] Target tab: new
+[debug] Generated URL: https://www.google.com/search?q=green+water+bottles
+[debug] Extension result profile: personal
+```
+
+The authentication token, cookies, account details, and internal model reasoning
+must not appear.
+
+## 8. Exercise search, constrained snapshot, click, and verification
 
 First test a search-only result:
 
@@ -180,7 +258,7 @@ SABEL > show recent browser actions
 Confirm it contains time/profile/domain/action outcome information but no token,
 typed values, page text, cookies, passwords, or MFA codes.
 
-## 8. Verify policy boundaries safely
+## 9. Verify policy boundaries safely
 
 Automated tests cover the injection and website-obligation cases without using
 real accounts:
@@ -201,7 +279,7 @@ a direct user instruction passed to Python's task manager can add reviewed scope
 Do not enter real passwords, payment data, MFA codes, or private email content to
 test SABEL. Sensitive fields remain blocked.
 
-## 9. Stop browser control
+## 10. Stop browser control
 
 While SABEL is running, use either:
 
@@ -214,4 +292,3 @@ be cancelled immediately. Existing manually managed tabs remain open. Later
 commands are rejected until **Reconnect** is selected in the popup.
 
 Finally type `exit` in SABEL. Confirm both extension popups become disconnected.
-

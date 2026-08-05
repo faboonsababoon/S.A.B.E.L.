@@ -8,6 +8,18 @@ from sabel.browser_tasks import BrowserAuditLog, BrowserTaskManager
 
 
 class BrowserTaskTests(unittest.TestCase):
+    def test_active_tasks_are_stored_independently_by_profile(self):
+        manager = BrowserTaskManager()
+        personal = manager.create(
+            "personal task", "personal task", "personal", {"google.com"}
+        )
+        nyu = manager.create("nyu task", "nyu task", "nyu", {"youtube.com"})
+        self.assertIs(manager.current_for_profile("personal"), personal)
+        self.assertIs(manager.current_for_profile("nyu"), nyu)
+        manager.stop(nyu)
+        self.assertIs(manager.current_for_profile("personal"), personal)
+        self.assertIsNone(manager.current_for_profile("nyu"))
+
     def test_task_scope_is_python_owned_and_only_direct_user_expansion_changes_it(self):
         manager = BrowserTaskManager(max_steps=8, step_extension=5)
         task = manager.create(

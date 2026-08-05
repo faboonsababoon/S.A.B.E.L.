@@ -6,7 +6,13 @@ import re
 from typing import List, Optional
 
 from sabel.actions import application_mentioned
+from sabel.application_catalog import ApplicationCatalog
 from sabel.browser_protocol import ACTION_FIELDS
+from sabel.browser_routing import (
+    WEB_SEARCH_ENGINES,
+    parse_browser_search_request as parse_structured_browser_search,
+    validate_search_query,
+)
 from sabel.confirmations import (
     TRASH_WARNING,
     UNCERTAIN_PENDING_RESPONSE,
@@ -14,8 +20,14 @@ from sabel.confirmations import (
 )
 from sabel.conversation_state import ConversationState
 from sabel.ollama_client import LocalToolCall, OllamaClient, OllamaResponse
+from sabel.request_models import ResolvedRequest
+from sabel.request_resolution import (
+    RequestResolver,
+    ResolutionDecision,
+    extract_locked_constraints,
+)
 from sabel.media import parse_media_request
-from sabel.services import service_mentioned
+from sabel.services import resolve_profile_service, service_mentioned
 from sabel.tool_schemas import (
     LOCAL_SYSTEM_PROMPT,
     LOCAL_TOOLS,
@@ -60,6 +72,7 @@ class RouterResult:
     expected_slot: Optional[str] = None
     duration_ms: float = 0.0
     error_code: Optional[str] = None
+    resolved_request: Optional[ResolvedRequest] = None
 
 
 class ClarificationReplyType(Enum):
@@ -87,6 +100,9 @@ INTERNAL_TOOL_NAMES = {
     for tool in LOCAL_TOOLS + PENDING_CONFIRMATION_TOOLS + PENDING_CLARIFICATION_TOOLS
 }
 INTERNAL_TOOL_NAMES.update(ACTION_FIELDS)
+INTERNAL_TOOL_NAMES.update(
+    {"browser_search", "open_service_in_profile", "open_service_default_browser"}
+)
 
 
 class LocalRouter:
@@ -95,12 +111,24 @@ class LocalRouter:
         client: OllamaClient,
         state: ConversationState,
         default_music_service: Optional[str] = None,
+        default_search_engine: Optional[str] = None,
+        application_catalog: Optional[ApplicationCatalog] = None,
+        request_resolver: Optional[RequestResolver] = None,
     ) -> None:
         self.client = client
         self.state = state
         self.default_music_service = default_music_service
+        self.default_search_engine = default_search_engine
+        self.application_catalog = application_catalog or ApplicationCatalog()
+        self.request_resolver = request_resolver or RequestResolver(
+            state,
+            self.application_catalog,
+            default_music_service=default_music_service,
+            default_search_engine=default_search_engine,
+        )
 
     def route(self, user_text: str) -> RouterResult:
+        locked = extract_locked_constraints(user_text)
         messages = [{"role": "system", "content": LOCAL_SYSTEM_PROMPT}]
         messages.extend(self.state.messages())
         messages.extend(
@@ -111,10 +139,13 @@ class LocalRouter:
                     "role": "system",
                     "content": "No clarification is pending. Treat the latest user message independently.",
                 },
+                {"role": "system", "content": locked.prompt_text()},
                 {"role": "user", "content": user_text},
             ]
         )
-        active_tools = _normal_tools_for(user_text, self.state)
+        active_tools = _normal_tools_for(
+            user_text, self.state, self.default_search_engine
+        )
         response = self.client.chat(messages, active_tools)
         result = _normal_result(response)
         if result.error_code == "raw_tool_name":
@@ -132,12 +163,22 @@ class LocalRouter:
             ]
             corrected = self.client.chat(corrective_messages, active_tools)
             result = _normal_result(corrected)
-        return _safe_domain_fallback(
+        result = _safe_domain_fallback(
             user_text,
             result,
             default_music_service=self.default_music_service,
+            default_search_engine=self.default_search_engine,
             state=self.state,
         )
+        model_call = result.tool_calls[0] if len(result.tool_calls) == 1 else None
+        decision = self.request_resolver.resolve(
+            user_text,
+            locked=locked,
+            model_tool_name=model_call.name if model_call else None,
+            model_arguments=model_call.arguments if model_call else None,
+            model_intent=model_call.name if model_call else result.result_type.value,
+        )
+        return _apply_resolution_decision(result, decision)
 
 
 class PendingActionRouter:
@@ -258,6 +299,44 @@ class ClarificationRouter:
         return ClarificationReply(reply_type, duration_ms=response.duration_ms)
 
 
+def _apply_resolution_decision(
+    original: RouterResult, decision: Optional[ResolutionDecision]
+) -> RouterResult:
+    """Convert one validated resolution into an explicit router result."""
+    if decision is None:
+        return original
+    if decision.message is not None:
+        return RouterResult(
+            RouterResultType.RESPONSE,
+            message=decision.message,
+            duration_ms=original.duration_ms,
+            resolved_request=decision.request,
+        )
+    if decision.clarification_question is not None:
+        clarification = ClarificationRequest(
+            question=decision.clarification_question,
+            intent=decision.clarification_intent or "",
+            collected_slots=dict(decision.collected_slots or {}),
+            missing_slots=list(decision.missing_slots),
+        )
+        return RouterResult(
+            RouterResultType.CLARIFICATION,
+            message=decision.clarification_question,
+            clarification=clarification,
+            expected_slot=(decision.missing_slots[0] if decision.missing_slots else None),
+            duration_ms=original.duration_ms,
+            resolved_request=decision.request,
+        )
+    if decision.tool_name and decision.arguments is not None:
+        return RouterResult(
+            RouterResultType.TOOL_CALLS,
+            tool_calls=[LocalToolCall(decision.tool_name, dict(decision.arguments))],
+            duration_ms=original.duration_ms,
+            resolved_request=decision.request,
+        )
+    return original
+
+
 def _normal_result(response: OllamaResponse) -> RouterResult:
     if len(response.tool_calls) > 1:
         return RouterResult(
@@ -369,7 +448,9 @@ def _tool_result(response: OllamaResponse) -> RouterResult:
 
 
 def _normal_tools_for(
-    user_text: str, state: Optional[ConversationState] = None
+    user_text: str,
+    state: Optional[ConversationState] = None,
+    default_search_engine: Optional[str] = None,
 ) -> list[dict]:
     """Reduce choices by domain without selecting the final action."""
     lowered = user_text.casefold()
@@ -384,8 +465,18 @@ def _normal_tools_for(
         names = {"show_recent_browser_actions"}
     elif _youtube_channel_target(user_text):
         names = {"browser_copilot_task", "request_clarification"}
-    elif _parse_browser_search_request(user_text, state) is not None:
-        names = {"browser_search", "request_clarification"}
+    elif _parse_browser_search_request(
+        user_text, state, default_search_engine
+    ) is not None:
+        parsed = _parse_browser_search_request(
+            user_text, state, default_search_engine
+        )
+        if parsed and parsed.get("search_engine") == "youtube":
+            names = {"search_youtube", "request_clarification"}
+        elif parsed and parsed.get("search_engine") in WEB_SEARCH_ENGINES:
+            names = {"search_web", "request_clarification"}
+        else:
+            names = {"search_web", "search_youtube", "request_clarification"}
     elif _looks_like_explicit_url_request(lowered):
         names = {"open_website", "request_clarification"}
     elif (
@@ -395,7 +486,7 @@ def _normal_tools_for(
             lowered, profile_service[0]
         )
     ):
-        names = {"open_service_in_profile", "request_clarification"}
+        names = {"open_service", "request_clarification"}
     elif "trash" in lowered:
         names = {"empty_trash", "get_trash_status", "request_clarification"}
     elif lowered.strip().startswith("play "):
@@ -422,6 +513,7 @@ def _safe_domain_fallback(
     result: RouterResult,
     *,
     default_music_service: Optional[str] = None,
+    default_search_engine: Optional[str] = None,
     state: Optional[ConversationState] = None,
 ) -> RouterResult:
     """Recover typed outcomes from the original request, never from model prose."""
@@ -503,30 +595,59 @@ def _safe_domain_fallback(
             ],
             duration_ms=result.duration_ms,
         )
-    search_request = _parse_browser_search_request(user_text, state)
-    if search_request and search_request.get("service"):
-        search_slots = {
-            key: value
-            for key, value in search_request.items()
-            if key in {"service", "query", "profile"} and value
-        }
-        return RouterResult(
-            RouterResultType.TOOL_CALLS,
-            tool_calls=[LocalToolCall("browser_search", search_slots)],
-            duration_ms=result.duration_ms,
-        )
+    search_request = _parse_browser_search_request(
+        user_text, state, default_search_engine
+    )
+    if (
+        search_request
+        and search_request.get("search_engine")
+        and search_request.get("profile_id")
+        and search_request.get("query")
+    ):
+        try:
+            query = validate_search_query(search_request["query"])
+        except ValueError:
+            query = ""
+        if query:
+            engine = str(search_request["search_engine"])
+            profile_id = str(search_request["profile_id"])
+            if engine == "youtube":
+                call = LocalToolCall(
+                    "search_youtube",
+                    {"query": query, "profile_id": profile_id},
+                )
+            else:
+                call = LocalToolCall(
+                    "search_web",
+                    {
+                        "query": query,
+                        "search_engine": engine,
+                        "profile_id": profile_id,
+                    },
+                )
+            return RouterResult(
+                RouterResultType.TOOL_CALLS,
+                tool_calls=[call],
+                duration_ms=result.duration_ms,
+            )
     if search_request:
         query = str(search_request.get("query") or "").strip()
         if not query:
             question = "What would you like me to search for?"
             missing = ["query"]
-        else:
+        elif search_request.get("missing_context") == "profile":
+            question = "Which Chrome profile should I use: Personal or NYU?"
+            missing = ["profile_id"]
+        elif not search_request.get("search_engine"):
             question = f"Should I search Google or YouTube for “{query}”?"
-            missing = ["service"]
+            missing = ["search_engine"]
+        else:
+            question = "Which Chrome profile should I use: Personal or NYU?"
+            missing = ["profile_id"]
         collected = {
             key: value
             for key, value in search_request.items()
-            if key in {"query", "profile"} and value
+            if key in {"query", "profile_id", "search_engine"} and value
         }
         return RouterResult(
             RouterResultType.CLARIFICATION,
@@ -546,12 +667,13 @@ def _safe_domain_fallback(
         and _looks_like_navigation_request(lowered)
         and _is_profile_service_homepage_request(lowered, profile_service[0])
     ):
-        arguments: dict[str, object] = {"service": profile_service[0]}
-        if profile_service[1]:
-            arguments["profile"] = profile_service[1]
+        arguments: dict[str, object] = {
+            "service_name": profile_service[0],
+            "profile_id": profile_service[1] or "personal",
+        }
         return RouterResult(
             RouterResultType.TOOL_CALLS,
-            tool_calls=[LocalToolCall("open_service_in_profile", arguments)],
+            tool_calls=[LocalToolCall("open_service", arguments)],
             duration_ms=result.duration_ms,
         )
 
@@ -665,9 +787,20 @@ def _zero_argument_result(name: str, duration_ms: float) -> RouterResult:
 
 
 def _service_result(service_name: str, duration_ms: float) -> RouterResult:
+    resolution = resolve_profile_service(service_name)
+    profile_id = (
+        resolution.service.default_profile
+        if resolution.service and resolution.service.default_profile
+        else "personal"
+    )
     return RouterResult(
         RouterResultType.TOOL_CALLS,
-        tool_calls=[LocalToolCall("open_service", {"service_name": service_name})],
+        tool_calls=[
+            LocalToolCall(
+                "open_service",
+                {"service_name": service_name, "profile_id": profile_id},
+            )
+        ],
         duration_ms=duration_ms,
     )
 
@@ -773,77 +906,36 @@ def _youtube_channel_target(text: str) -> Optional[str]:
 
 
 def _parse_browser_search_request(
-    text: str, state: Optional[ConversationState] = None
+    text: str,
+    state: Optional[ConversationState] = None,
+    default_search_engine: Optional[str] = None,
 ) -> Optional[dict[str, object]]:
-    """Parse common search word order while preserving Python-owned context."""
-    cleaned = " ".join(text.strip().split()).strip(" .!?")
-    match = re.match(
-        r"^(?:please\s+)?(?:search(?:\s+up)?|look\s+up|find)\s*(.*)$",
-        cleaned,
-        re.I,
+    """Compatibility view over the structured search-slot parser."""
+    reference = state.current_browser_reference() if state is not None else None
+    parsed = parse_structured_browser_search(
+        text,
+        reference=reference,
+        last_query=state.last_browser_query if state is not None else None,
+        default_search_engine=default_search_engine,
     )
-    if not match:
+    if parsed is None:
         return None
-    remainder = match.group(1).strip()
-    profile = None
-    profile_match = re.search(
-        r"\s+in\s+(personal|nyu)(?:\s+(?:profile|browser))?$",
-        remainder,
-        re.I,
-    )
-    if profile_match:
-        profile = profile_match.group(1).casefold()
-        remainder = remainder[: profile_match.start()].strip()
-    remainder = re.sub(r"\s+(?:in|on)\s+it$", "", remainder, flags=re.I).strip()
-
-    service = None
-    service_first = re.match(
-        r"^(google|youtube)(?:\.com)?(?:\s+for)?\s+(.+)$",
-        remainder,
-        re.I,
-    )
-    service_last = re.match(
-        r"^(.+?)\s+(?:on|in)\s+(google|youtube)(?:\.com)?$",
-        remainder,
-        re.I,
-    )
-    if service_first:
-        service = service_first.group(1).casefold()
-        remainder = service_first.group(2)
-    elif service_last:
-        remainder = service_last.group(1)
-        service = service_last.group(2).casefold()
-
-    query = remainder.strip().removesuffix(" up").strip()
-    if len(query) >= 2 and (
-        (query[0] == query[-1] and query[0] in {'"', "'"})
-        or (query[0], query[-1]) in {("“", "”"), ("‘", "’")}
-    ):
-        query = query[1:-1].strip()
-    if re.fullmatch(
-        r"(?:that\s+)?(?:same\s+)?(?:string|search|query|thing|one|it)",
-        query,
-        re.I,
-    ):
-        query = state.last_browser_query if state and state.last_browser_query else query
-    if service is None and state is not None:
-        if state.last_browser_service in {"google", "youtube"}:
-            service = state.last_browser_service
-    if profile is None and state is not None:
-        profile = state.last_browser_profile
-
-    values: dict[str, object] = {"query": query}
-    if service:
-        values["service"] = service
-    if profile:
-        values["profile"] = profile
-    return values
+    return {
+        "query": parsed.query,
+        "search_engine": parsed.search_engine,
+        "profile_id": parsed.profile_id,
+        "explicit_search_engine": parsed.explicit_search_engine,
+        "explicit_profile_id": parsed.explicit_profile_id,
+        "references_context": parsed.references_context,
+        "missing_context": parsed.missing_context,
+        "routing_conflict": parsed.routing_conflict,
+    }
 
 
 def _browser_search_slots(text: str) -> Optional[dict[str, object]]:
     """Compatibility wrapper for callers that do not have session context."""
     parsed = _parse_browser_search_request(text)
-    return parsed if parsed and parsed.get("service") else None
+    return parsed if parsed and parsed.get("search_engine") else None
 
 
 def _profile_service_slots(text: str) -> Optional[tuple[str, Optional[str]]]:

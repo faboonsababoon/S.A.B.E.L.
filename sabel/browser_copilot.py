@@ -1,18 +1,30 @@
 """Profile-aware high-level browser operations with observe–act–verify tasks."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Callable, Optional, Protocol
 from urllib.parse import quote_plus
 import uuid
 
 from sabel.browser_models import (
+    BrowserActionContext,
     BrowserActionState,
     BrowserProfile,
     BrowserResult,
+    BrowserSearchRequest,
     BrowserTask,
     BrowserTaskStatus,
+    ProfileBrowserState,
+)
+from sabel.browser_routing import (
+    SEARCH_PROVIDER_URLS,
+    WEB_SEARCH_ENGINES,
+    build_search_url,
+    normalize_search_engine,
+    search_provider_display_name,
+    validate_search_query,
+    verify_search_url,
 )
 from sabel.browser_policy import (
     BrowserActionProposal,
@@ -28,6 +40,7 @@ from sabel.browser_security import (
 from sabel.browser_tasks import BrowserAuditLog, BrowserTaskManager
 from sabel.browser_transport import BrowserTransport
 from sabel.services import Service, resolve_profile_service
+from sabel.request_models import BrowserExecutionEvidence
 
 
 @dataclass(frozen=True)
@@ -39,6 +52,9 @@ class BrowserOutcome:
     task_id: Optional[str] = None
     confirmation_prompt: Optional[str] = None
     clarification: Optional[str] = None
+    context: Optional[BrowserActionContext] = None
+    target_tab_id: Optional[int] = None
+    evidence: Optional[BrowserExecutionEvidence] = None
 
 
 class BrowserPlanner(Protocol):
@@ -105,12 +121,17 @@ class BrowserCopilot:
         self.audit_log = audit_log or BrowserAuditLog()
         self.albert_url = albert_url
         self.default_gmail_profile = default_gmail_profile
+        self.browser_state_by_profile: dict[str, ProfileBrowserState] = {}
 
     def connected_profiles(self) -> list[BrowserProfile]:
         return self.transport.connected_profiles()
 
     def show_profiles(self) -> BrowserOutcome:
-        profiles = self.connected_profiles()
+        order = {"personal": 0, "nyu": 1}
+        profiles = sorted(
+            self.connected_profiles(),
+            key=lambda profile: (order.get(profile.profile_id, 99), profile.profile_id),
+        )
         if not profiles:
             return BrowserOutcome(
                 BrowserActionState.EXECUTED,
@@ -118,7 +139,9 @@ class BrowserCopilot:
                 True,
             )
         lines = ["Connected browser profiles"]
-        lines.extend(f"{profile.profile_name} ({profile.profile_id})" for profile in profiles)
+        lines.extend(
+            f"- {profile.profile_name} ({profile.profile_id})" for profile in profiles
+        )
         return BrowserOutcome(BrowserActionState.VERIFIED, "\n".join(lines), True, True)
 
     async def show_tabs(self, profile_id: str) -> BrowserOutcome:
@@ -137,6 +160,12 @@ class BrowserCopilot:
         )
         if not result.success:
             return self._transport_failure(result)
+        if result.profile_id != profile_id:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser returned tabs from the wrong Chrome profile.",
+                False,
+            )
         tabs = result.result.get("tabs")
         if not isinstance(tabs, list) or not tabs:
             return BrowserOutcome(
@@ -209,7 +238,15 @@ class BrowserCopilot:
             )
         disconnected = self._disconnected_profile(selected_profile)
         if disconnected:
-            return disconnected
+            return replace(
+                disconnected,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=selected_profile,
+                    requested_url=service.url,
+                    verified=False,
+                    error_code="PROFILE_DISCONNECTED",
+                ),
+            )
         result = await self.transport.send_request(
             selected_profile,
             "browser_open_tab",
@@ -223,14 +260,68 @@ class BrowserCopilot:
             "service_registry_allow",
         )
         if not result.success:
-            return self._transport_failure(result)
+            return self._transport_failure(
+                result,
+                requested_profile_id=selected_profile,
+                requested_url=service.url,
+            )
+        verified = self._verified_tab_result(result, selected_profile, service.url)
+        if isinstance(verified, BrowserOutcome):
+            return verified
+        tab_id, resulting_url = verified
+        search_engine = (
+            resolution.service_name
+            if resolution.service_name in SEARCH_PROVIDER_URLS
+            else None
+        )
+        context = BrowserActionContext(
+            profile_id=selected_profile,
+            service=resolution.service_name,
+            search_engine=search_engine,
+            tab_id=tab_id,
+            url=resulting_url,
+            connection_instance_id=result.connection_instance_id,
+        )
+        self._update_profile_state(context, "open_service")
         profile_name = self._profile_name(selected_profile)
         return BrowserOutcome(
-            BrowserActionState.EXECUTED,
+            BrowserActionState.VERIFIED,
             f"Opening {service.display_name} in your {profile_name} Chrome profile.",
             True,
-            False,
+            True,
+            context=context,
+            evidence=BrowserExecutionEvidence(
+                requested_profile_id=selected_profile,
+                requested_url=service.url,
+                request_id=result.request_id,
+                result_profile_id=result.profile_id,
+                result_url=resulting_url,
+                result_tab_id=tab_id,
+                verified=True,
+            ),
         )
+
+    async def search_web(
+        self,
+        query: str,
+        search_engine: str,
+        profile_id: Optional[str] = None,
+    ) -> BrowserOutcome:
+        selected_engine = normalize_search_engine(search_engine)
+        if selected_engine not in WEB_SEARCH_ENGINES:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "Browser web search supports Google, Bing, and DuckDuckGo.",
+                False,
+            )
+        return await self._search(query, selected_engine, profile_id or "personal")
+
+    async def search_youtube(
+        self,
+        query: str,
+        profile_id: Optional[str] = None,
+    ) -> BrowserOutcome:
+        return await self._search(query, "youtube", profile_id or "personal")
 
     async def browser_search(
         self,
@@ -238,41 +329,176 @@ class BrowserCopilot:
         query: str,
         profile_id: Optional[str] = None,
     ) -> BrowserOutcome:
-        resolution = resolve_profile_service(service_name)
-        service = resolution.service
-        if service is None or resolution.service_name not in {"youtube", "google"}:
-            return BrowserOutcome(
-                BrowserActionState.FAILED,
-                "Browser search currently supports YouTube and Google.",
-                False,
-            )
-        cleaned = " ".join(query.strip().split())
-        if not cleaned:
-            return BrowserOutcome(BrowserActionState.FAILED, "Please provide a search query.", False)
-        selected_profile = profile_id or service.default_profile or "personal"
+        """Compatibility adapter; new router results use distinct search tools."""
+        selected = normalize_search_engine(service_name)
+        if selected == "youtube":
+            return await self.search_youtube(query, profile_id)
+        if selected in WEB_SEARCH_ENGINES:
+            return await self.search_web(query, selected, profile_id)
+        return BrowserOutcome(
+            BrowserActionState.FAILED,
+            "Browser search supports YouTube, Google, Bing, and DuckDuckGo.",
+            False,
+        )
+
+    async def _search(
+        self,
+        query: str,
+        search_engine: str,
+        profile_id: str,
+    ) -> BrowserOutcome:
+        try:
+            cleaned = validate_search_query(query)
+            url = build_search_url(search_engine, cleaned)
+        except ValueError as error:
+            return BrowserOutcome(BrowserActionState.FAILED, str(error), False)
+        selected_profile = profile_id
         disconnected = self._disconnected_profile(selected_profile)
         if disconnected:
-            return disconnected
-        if resolution.service_name == "youtube":
-            url = "https://www.youtube.com/results?search_query=" + quote_plus(cleaned)
+            return replace(
+                disconnected,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=selected_profile,
+                    requested_url=url,
+                    target_tab_id=None,
+                    verified=False,
+                    error_code="PROFILE_DISCONNECTED",
+                ),
+            )
+
+        profile_state = self._profile_state(selected_profile)
+        target_tab_id = (
+            profile_state.active_tab_id
+            if profile_state.active_tab_id is not None
+            and (
+                profile_state.last_search_engine == search_engine
+                or profile_state.last_service == search_engine
+            )
+            else None
+        )
+        request = BrowserSearchRequest(
+            profile_id=selected_profile,
+            search_engine=search_engine,
+            query=cleaned,
+            target_tab_id=target_tab_id,
+        )
+        if request.target_tab_id is None:
+            action = "browser_open_tab"
+            arguments: dict[str, object] = {"url": url, "active": True}
         else:
-            url = "https://www.google.com/search?q=" + quote_plus(cleaned)
+            action = "browser_navigate"
+            arguments = {"tab_id": request.target_tab_id, "url": url}
         result = await self.transport.send_request(
-            selected_profile, "browser_open_tab", {"url": url, "active": True}
+            selected_profile, action, arguments
         )
         self._audit_direct(
             selected_profile,
             normalized_domain(url),
-            "browser_open_tab",
+            action,
             result.state.value,
             "search_registry_allow",
         )
+        if (
+            not result.success
+            and request.target_tab_id is not None
+            and result.error_code == "TAB_NOT_FOUND"
+        ):
+            request = BrowserSearchRequest(
+                profile_id=selected_profile,
+                search_engine=search_engine,
+                query=cleaned,
+                target_tab_id=None,
+            )
+            action = "browser_open_tab"
+            result = await self.transport.send_request(
+                selected_profile,
+                action,
+                {"url": url, "active": True},
+            )
+            self._audit_direct(
+                selected_profile,
+                normalized_domain(url),
+                action,
+                result.state.value,
+                "stale_tab_recovery_allow",
+            )
         if not result.success:
-            return self._transport_failure(result)
+            return self._transport_failure(
+                result,
+                requested_profile_id=selected_profile,
+                requested_url=url,
+                target_tab_id=request.target_tab_id,
+            )
+        if result.profile_id != selected_profile:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser returned a result from the wrong Chrome profile.",
+                False,
+                target_tab_id=request.target_tab_id,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=selected_profile,
+                    requested_url=url,
+                    target_tab_id=request.target_tab_id,
+                    request_id=result.request_id,
+                    result_profile_id=result.profile_id,
+                    result_url=(str(result.result.get("url")) if result.result.get("url") else None),
+                    verified=False,
+                    error_code="WRONG_PROFILE",
+                ),
+            )
+        tab_id = self._tab_id(result)
+        resulting_url = result.result.get("url")
+        if (
+            tab_id is None
+            or (request.target_tab_id is not None and tab_id != request.target_tab_id)
+            or not verify_search_url(resulting_url, search_engine, cleaned)
+        ):
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser did not return the requested search provider and query, so I did not report success.",
+                False,
+                target_tab_id=request.target_tab_id,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=selected_profile,
+                    requested_url=url,
+                    target_tab_id=request.target_tab_id,
+                    request_id=result.request_id,
+                    result_profile_id=result.profile_id,
+                    result_url=(str(resulting_url) if resulting_url else None),
+                    result_tab_id=tab_id,
+                    verified=False,
+                    error_code="DESTINATION_MISMATCH",
+                ),
+            )
+        context = BrowserActionContext(
+            profile_id=selected_profile,
+            service=search_engine,
+            search_engine=search_engine,
+            query=cleaned,
+            tab_id=tab_id,
+            url=str(resulting_url),
+            connection_instance_id=result.connection_instance_id,
+        )
+        self._update_profile_state(context, "search")
+        provider_name = search_provider_display_name(search_engine)
+        profile_name = self._profile_name(selected_profile)
         return BrowserOutcome(
-            BrowserActionState.EXECUTED,
-            f"Searching {service.display_name} for “{cleaned}.”",
+            BrowserActionState.VERIFIED,
+            f"Searching {provider_name} for “{cleaned}” in your {profile_name} Chrome profile.",
             True,
+            True,
+            context=context,
+            target_tab_id=request.target_tab_id,
+            evidence=BrowserExecutionEvidence(
+                requested_profile_id=selected_profile,
+                requested_url=url,
+                target_tab_id=request.target_tab_id,
+                request_id=result.request_id,
+                result_profile_id=result.profile_id,
+                result_url=str(resulting_url),
+                result_tab_id=tab_id,
+                verified=True,
+            ),
         )
 
     async def open_youtube_channel(
@@ -351,21 +577,33 @@ class BrowserCopilot:
             return final_page
         if self._verify_youtube_channel(cleaned_target, final_page):
             task.status = BrowserTaskStatus.VERIFIED
+            context = BrowserActionContext(
+                profile_id="personal",
+                service="youtube",
+                search_engine="youtube",
+                query=cleaned_target,
+                tab_id=task.current_tab_id,
+                url=str(final_page.get("url") or ""),
+                connection_instance_id=active.connection_instance_id,
+            )
+            self._update_profile_state(context, "open_youtube_channel")
             return BrowserOutcome(
                 BrowserActionState.VERIFIED,
                 f"Opened {cleaned_target}’s YouTube channel.",
                 True,
                 True,
                 task.task_id,
+                context=context,
             )
         task.status = BrowserTaskStatus.FAILED
         return self._failed_search(cleaned_target, task)
 
     async def stop_task(self) -> BrowserOutcome:
+        tasks = list(self.task_manager.current_tasks_by_profile.values())
         task = self.task_manager.current_task
         profile_ids = (
-            [task.profile_id]
-            if task is not None
+            [item.profile_id for item in tasks]
+            if tasks
             else [profile.profile_id for profile in self.connected_profiles()]
         )
         if not profile_ids:
@@ -375,7 +613,12 @@ class BrowserCopilot:
                 True,
             )
         for profile_id in profile_ids:
-            arguments = {"task_id": task.task_id} if task is not None else {}
+            profile_task = self.task_manager.current_for_profile(profile_id)
+            arguments = (
+                {"task_id": profile_task.task_id}
+                if profile_task is not None
+                else {}
+            )
             result = await self.transport.send_request(
                 profile_id, "browser_stop_task", arguments
             )
@@ -388,8 +631,8 @@ class BrowserCopilot:
             )
             if not result.success and result.error_code != "CANCELLED":
                 return self._transport_failure(result, task.task_id if task else None)
-        if task is not None:
-            self.task_manager.stop(task)
+        for active_task in tasks:
+            self.task_manager.stop(active_task)
         return BrowserOutcome(
             BrowserActionState.CANCELLED,
             "Browser control stopped. Manual browsing was not affected.",
@@ -515,6 +758,14 @@ class BrowserCopilot:
         if not result.success:
             task.status = BrowserTaskStatus.FAILED
             return self._transport_failure(result, task.task_id)
+        if result.profile_id != task.profile_id:
+            task.status = BrowserTaskStatus.FAILED
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser returned a result from the wrong Chrome profile.",
+                False,
+                task_id=task.task_id,
+            )
         return result
 
     def _audit(
@@ -567,7 +818,7 @@ class BrowserCopilot:
         label = "NYU" if profile_id == "nyu" else "Personal"
         return BrowserOutcome(
             BrowserActionState.FAILED,
-            f"The {label} browser profile is not currently connected.",
+            f"Your {label} Chrome profile is not connected.",
             False,
         )
 
@@ -576,6 +827,72 @@ class BrowserCopilot:
             if profile.profile_id == profile_id:
                 return profile.profile_name
         return "NYU" if profile_id == "nyu" else "Personal"
+
+    def _profile_state(self, profile_id: str) -> ProfileBrowserState:
+        state = self.browser_state_by_profile.get(profile_id)
+        if state is None:
+            state = ProfileBrowserState(profile_id=profile_id)
+            self.browser_state_by_profile[profile_id] = state
+        return state
+
+    def _update_profile_state(
+        self, context: BrowserActionContext, successful_action: str
+    ) -> None:
+        state = self._profile_state(context.profile_id)
+        state.active_tab_id = context.tab_id
+        state.last_service = context.service
+        state.last_search_engine = context.search_engine
+        if context.query is not None:
+            state.last_search_query = context.query
+        state.last_successful_action = successful_action
+        state.last_url = context.url
+
+    @staticmethod
+    def _verified_tab_result(
+        result: BrowserResult,
+        profile_id: str,
+        expected_url: str,
+    ) -> tuple[int, str] | BrowserOutcome:
+        if result.profile_id != profile_id:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser returned a result from the wrong Chrome profile.",
+                False,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=profile_id,
+                    requested_url=expected_url,
+                    request_id=result.request_id,
+                    result_profile_id=result.profile_id,
+                    result_url=(str(result.result.get("url")) if result.result.get("url") else None),
+                    verified=False,
+                    error_code="WRONG_PROFILE",
+                ),
+            )
+        tab_id = BrowserCopilot._tab_id(result)
+        resulting_url = result.result.get("url")
+        try:
+            destination_matches = (
+                normalized_domain(resulting_url) == normalized_domain(expected_url)
+            )
+        except BrowserSecurityError:
+            destination_matches = False
+        if tab_id is None or not isinstance(resulting_url, str) or not destination_matches:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser did not verify the requested destination, so I did not report success.",
+                False,
+                evidence=BrowserExecutionEvidence(
+                    requested_profile_id=profile_id,
+                    requested_url=expected_url,
+                    request_id=result.request_id,
+                    result_profile_id=result.profile_id,
+                    result_url=(str(resulting_url) if resulting_url else None),
+                    result_tab_id=tab_id,
+                    verified=False,
+                    error_code="DESTINATION_MISMATCH",
+                ),
+            )
+        return tab_id, resulting_url
 
     @staticmethod
     def _tab_id(result: BrowserResult) -> Optional[int]:
@@ -612,12 +929,31 @@ class BrowserCopilot:
 
     @staticmethod
     def _transport_failure(
-        result: BrowserResult, task_id: Optional[str] = None
+        result: BrowserResult,
+        task_id: Optional[str] = None,
+        *,
+        requested_profile_id: Optional[str] = None,
+        requested_url: str = "",
+        target_tab_id: Optional[int] = None,
     ) -> BrowserOutcome:
+        evidence = None
+        if requested_profile_id is not None:
+            evidence = BrowserExecutionEvidence(
+                requested_profile_id=requested_profile_id,
+                requested_url=requested_url,
+                target_tab_id=target_tab_id,
+                request_id=result.request_id,
+                result_profile_id=result.profile_id,
+                result_url=(str(result.result.get("url")) if result.result.get("url") else None),
+                result_tab_id=BrowserCopilot._tab_id(result),
+                verified=False,
+                error_code=result.error_code,
+            )
         return BrowserOutcome(
             result.state,
             result.error or "The browser action failed.",
             False,
             False,
             task_id,
+            evidence=evidence,
         )

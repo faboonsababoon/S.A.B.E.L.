@@ -17,6 +17,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_HISTORY_LIMIT = 10
 DEFAULT_PENDING_ACTION_TTL = 60.0
 DEFAULT_CLARIFICATION_TTL = 60.0
+DEFAULT_BROWSER_REFERENCE_TTL = 300.0
 DEFAULT_MAX_OUTPUT_TOKENS = 2000
 DEFAULT_REQUEST_TIMEOUT = 60.0
 DEFAULT_BROWSER_BRIDGE_PORT = 8765
@@ -32,7 +33,9 @@ class Settings:
     history_limit: int = DEFAULT_HISTORY_LIMIT
     pending_action_ttl: float = DEFAULT_PENDING_ACTION_TTL
     clarification_ttl: float = DEFAULT_CLARIFICATION_TTL
+    browser_reference_ttl: float = DEFAULT_BROWSER_REFERENCE_TTL
     default_music_service: Optional[str] = None
+    default_search_engine: Optional[str] = None
     browser_bridge_port: int = DEFAULT_BROWSER_BRIDGE_PORT
     browser_max_actions: int = DEFAULT_BROWSER_MAX_ACTIONS
     browser_token_path: Path = Path.home() / ".sabel" / "browser-token"
@@ -80,6 +83,17 @@ def _optional_profile(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _optional_search_engine(value: Optional[str]) -> Optional[str]:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized not in {"google", "bing", "duckduckgo"}:
+        raise ValueError(
+            "Default search engine must be google, bing, or duckduckgo."
+        )
+    return normalized
+
+
 def _optional_https_url(value: Optional[str]) -> Optional[str]:
     if value is None or not value.strip():
         return None
@@ -108,6 +122,9 @@ def load_settings(
         raise ValueError("Cloud mode must be off, ask, or auto.")
     default_music_service = normalize_music_service(
         source.get("SABEL_DEFAULT_MUSIC_SERVICE")
+    )
+    default_search_engine = _optional_search_engine(
+        source.get("SABEL_DEFAULT_SEARCH_ENGINE")
     )
     default_gmail_profile = _optional_profile(
         source.get("SABEL_DEFAULT_GMAIL_PROFILE")
@@ -138,7 +155,12 @@ def load_settings(
         clarification_ttl=_positive_float(
             source.get("SABEL_CLARIFICATION_TTL"), DEFAULT_CLARIFICATION_TTL
         ),
+        browser_reference_ttl=_positive_float(
+            source.get("SABEL_BROWSER_REFERENCE_TTL"),
+            DEFAULT_BROWSER_REFERENCE_TTL,
+        ),
         default_music_service=default_music_service,
+        default_search_engine=default_search_engine,
         browser_bridge_port=_browser_port(source.get("SABEL_BROWSER_BRIDGE_PORT")),
         browser_max_actions=_positive_int(
             source.get("SABEL_BROWSER_MAX_ACTIONS"), DEFAULT_BROWSER_MAX_ACTIONS

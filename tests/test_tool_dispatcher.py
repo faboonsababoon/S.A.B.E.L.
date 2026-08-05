@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 from sabel.actions import ActionResult
 from sabel.browser_copilot import BrowserOutcome
-from sabel.browser_models import BrowserActionState
+from sabel.browser_models import BrowserActionContext, BrowserActionState
 from sabel.config import Settings
 from sabel.conversation_state import ConversationState
 from sabel.tool_dispatcher import ToolDispatcher
@@ -219,6 +219,85 @@ class ToolDispatcherTests(unittest.TestCase):
         browser.open_service_in_profile.assert_called_once_with(
             "youtube", "personal"
         )
+
+    def test_distinct_search_tools_validate_fields_and_preserve_context(self):
+        browser = Mock()
+        context = BrowserActionContext(
+            profile_id="personal",
+            service="google",
+            search_engine="google",
+            query="green water bottles",
+            tab_id=3,
+            url="https://www.google.com/search?q=green+water+bottles",
+        )
+        browser.search_web.return_value = BrowserOutcome(
+            BrowserActionState.VERIFIED,
+            "Searching Google for “green water bottles” in your Personal Chrome profile.",
+            True,
+            True,
+            context=context,
+        )
+        dispatcher = ToolDispatcher(
+            Settings(), self.state, lambda: True, self.handlers, browser
+        )
+        result = dispatcher.dispatch(
+            "search_web",
+            {
+                "query": "green water bottles",
+                "search_engine": "google",
+                "profile_id": "personal",
+            },
+            "search green water bottles in Google in Personal",
+        )
+        self.assertTrue(result.verified)
+        self.assertEqual(result.browser_context, context)
+        browser.search_web.assert_called_once_with(
+            "green water bottles", "google", "personal"
+        )
+
+        browser.search_web.reset_mock()
+        default_dispatcher = ToolDispatcher(
+            Settings(default_search_engine="bing"),
+            self.state,
+            lambda: True,
+            self.handlers,
+            browser,
+        )
+        default_dispatcher.dispatch(
+            "search_web",
+            {
+                "query": "cats",
+                "search_engine": "default",
+                "profile_id": "personal",
+            },
+            "search for cats in my personal profile",
+        )
+        browser.search_web.assert_called_once_with("cats", "bing", "personal")
+
+        for arguments in (
+            {
+                "query": "cats in my nyu profile",
+                "search_engine": "google",
+                "profile_id": "personal",
+            },
+            {
+                "query": "cats",
+                "search_engine": "unknown",
+                "profile_id": "personal",
+            },
+            {"query": "cats", "search_engine": "google"},
+            {
+                "query": "cats",
+                "search_engine": "google",
+                "profile_id": "work",
+            },
+        ):
+            with self.subTest(arguments=arguments):
+                rejected = dispatcher.dispatch(
+                    "search_web", arguments, "search request"
+                )
+                self.assertFalse(rejected.action_success)
+        self.assertEqual(browser.search_web.call_count, 1)
 
     def test_browser_result_clarification_and_argument_validation(self):
         browser = Mock()

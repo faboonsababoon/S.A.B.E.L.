@@ -21,8 +21,16 @@ function chromeMock(options = {}) {
     tabs: {
       async query(query) { return [tab]; },
       async get(id) { return { ...tab, id }; },
-      async create(value) { calls.create.push(value); return { ...tab, id: 8, url: value.url, active: value.active }; },
-      async update(id, value) { calls.update.push([id, value]); return { ...tab, id, ...value }; },
+      async create(value) {
+        calls.create.push(value);
+        if (options.pendingNavigation) return { ...tab, id: 8, url: "", pendingUrl: value.url, active: value.active };
+        return { ...tab, id: 8, url: value.url, active: value.active };
+      },
+      async update(id, value) {
+        calls.update.push([id, value]);
+        if (options.pendingNavigation) return { ...tab, id, url: tab.url, pendingUrl: value.url };
+        return { ...tab, id, ...value };
+      },
       async remove(id) { calls.remove.push(id); },
       async goBack(id) { calls.update.push([id, { goBack: true }]); },
       async sendMessage(id, message) {
@@ -107,6 +115,52 @@ test("commands route to the correct tab and return structured responses", async 
   assert.equal(opened.tab_id, 8);
   assert.equal(chrome.calls.create[0].url, "https://www.youtube.com/");
   assert.deepEqual(chrome.calls.windowUpdate[0], [2, { focused: true }]);
+});
+
+test("extension rejects a command for a different configured profile", async () => {
+  const { controller, chrome } = controllerHarness();
+  await controller.loadSettings();
+  const sent = [];
+  controller.state.socket = { readyState: 1, send(value) { sent.push(JSON.parse(value)); } };
+  await controller.handleBridgeMessage(JSON.stringify({
+    protocol_version: 1,
+    type: "command",
+    request_id: "request-wrong-profile",
+    profile_id: "nyu",
+    action: "browser_open_tab",
+    arguments: { url: "https://www.youtube.com/", active: true }
+  }));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].success, false);
+  assert.equal(sent[0].error.code, "PROFILE_MISMATCH");
+  assert.equal(chrome.calls.create.length, 0);
+});
+
+test("navigation focuses only the tab returned by this extension instance", async () => {
+  const { controller, chrome } = controllerHarness();
+  await controller.loadSettings();
+  const navigated = await controller.executeCommand("browser_navigate", {
+    tab_id: 7,
+    url: "https://www.google.com/search?q=cats"
+  });
+  assert.equal(navigated.tab_id, 7);
+  assert.deepEqual(chrome.calls.update[0], [7, { url: "https://www.google.com/search?q=cats" }]);
+  assert.deepEqual(chrome.calls.windowUpdate[0], [2, { focused: true }]);
+});
+
+test("pending Chrome navigation returns the accepted destination for exact verification", async () => {
+  const { controller } = controllerHarness({ pendingNavigation: true });
+  await controller.loadSettings();
+  const opened = await controller.executeCommand("browser_open_tab", {
+    url: "https://www.youtube.com/",
+    active: true
+  });
+  const navigated = await controller.executeCommand("browser_navigate", {
+    tab_id: 7,
+    url: "https://www.google.com/search?q=nintendo+3ds"
+  });
+  assert.equal(opened.url, "https://www.youtube.com/");
+  assert.equal(navigated.url, "https://www.google.com/search?q=nintendo+3ds");
 });
 
 test("restricted pages and denied site permissions do not inject content scripts", async () => {

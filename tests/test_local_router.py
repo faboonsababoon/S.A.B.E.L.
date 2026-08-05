@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock
 
 from sabel.confirmations import TRASH_DESCRIPTION, TRASH_WARNING
+from sabel.browser_models import BrowserActionContext
 from sabel.conversation_state import ConversationState
 from sabel.local_router import (
     ClarificationReplyType,
@@ -15,6 +16,139 @@ from sabel.ollama_client import LocalToolCall, OllamaResponse
 
 
 class LocalRouterTests(unittest.TestCase):
+    def test_provider_led_google_commands_are_repaired_to_complete_search_calls(self):
+        client = Mock()
+        client.chat.return_value = OllamaResponse(
+            "I do not recognize that browser service.", [], 1.0
+        )
+        router = LocalRouter(client, ConversationState(10))
+        cases = {
+            "ggoogle nintendo 3ds using my personal profile": LocalToolCall(
+                "search_web",
+                {
+                    "query": "nintendo 3ds",
+                    "search_engine": "google",
+                    "profile_id": "personal",
+                },
+            ),
+            'google "nintendo 3ds" on my personal profile': LocalToolCall(
+                "search_web",
+                {
+                    "query": "nintendo 3ds",
+                    "search_engine": "google",
+                    "profile_id": "personal",
+                },
+            ),
+            "google nintendo 3ds": LocalToolCall(
+                "search_web",
+                {
+                    "query": "nintendo 3ds",
+                    "search_engine": "google",
+                    "profile_id": "personal",
+                },
+            ),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(router.route(text).tool_calls, [expected])
+
+    def test_required_profile_search_sequence_uses_distinct_high_level_tools(self):
+        state = ConversationState(10)
+        state.record_verified_browser_context(
+            BrowserActionContext(
+                profile_id="nyu",
+                service="youtube",
+                search_engine="youtube",
+                tab_id=7,
+                url="https://www.youtube.com/",
+            )
+        )
+        client = Mock()
+        client.chat.return_value = OllamaResponse(
+            "ambiguous model prose", [], 1.0
+        )
+        router = LocalRouter(client, state)
+        cases = {
+            'in the same profile, search up "matt rober"': LocalToolCall(
+                "search_youtube",
+                {"query": "matt rober", "profile_id": "nyu"},
+            ),
+            "now go to google and search up matie stone in my nyu profile": LocalToolCall(
+                "search_web",
+                {
+                    "query": "matie stone",
+                    "search_engine": "google",
+                    "profile_id": "nyu",
+                },
+            ),
+            "search up matt rober in google in my nyu profile": LocalToolCall(
+                "search_web",
+                {
+                    "query": "matt rober",
+                    "search_engine": "google",
+                    "profile_id": "nyu",
+                },
+            ),
+            'search "green water bottles" in google in my personal profile': LocalToolCall(
+                "search_web",
+                {
+                    "query": "green water bottles",
+                    "search_engine": "google",
+                    "profile_id": "personal",
+                },
+            ),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                result = router.route(text)
+                self.assertEqual(result.tool_calls, [expected])
+
+    def test_inconsistent_model_search_arguments_are_repaired_from_current_turn(self):
+        state = ConversationState(10)
+        state.record_browser_context("youtube", "nyu", "old query")
+        client = Mock()
+        client.chat.return_value = OllamaResponse(
+            "",
+            [
+                LocalToolCall(
+                    "search_youtube",
+                    {
+                        "query": "green water bottles in google in my personal profile",
+                        "profile_id": "nyu",
+                    },
+                )
+            ],
+            1.0,
+        )
+        result = LocalRouter(client, state).route(
+            'search "green water bottles" in google in my personal profile'
+        )
+        self.assertEqual(
+            result.tool_calls,
+            [
+                LocalToolCall(
+                    "search_web",
+                    {
+                        "query": "green water bottles",
+                        "search_engine": "google",
+                        "profile_id": "personal",
+                    },
+                )
+            ],
+        )
+
+    def test_each_search_turn_receives_fresh_arguments_and_no_old_query(self):
+        client = Mock()
+        client.chat.return_value = OllamaResponse("model prose", [], 1.0)
+        router = LocalRouter(client, ConversationState(10))
+        first = router.route("search cats in google in my personal profile")
+        second = router.route("search dogs in google in my personal profile")
+        first_arguments = first.tool_calls[0].arguments
+        second_arguments = second.tool_calls[0].arguments
+        self.assertIsNot(first_arguments, second_arguments)
+        first_arguments["query"] = "mutated"
+        self.assertEqual(second_arguments["query"], "dogs")
+
     def test_router_result_types_are_explicit(self):
         self.assertEqual(RouterResultType.RESPONSE.value, "response")
         self.assertEqual(RouterResultType.TOOL_CALLS.value, "tool_calls")
@@ -24,8 +158,8 @@ class LocalRouterTests(unittest.TestCase):
         examples = [
             (
                 "Open YouTube",
-                "open_service_in_profile",
-                {"service": "youtube", "profile": "personal"},
+                "open_service",
+                {"service_name": "youtube", "profile_id": "personal"},
             ),
             (
                 "Go to SSundee’s YouTube channel",
@@ -42,8 +176,12 @@ class LocalRouterTests(unittest.TestCase):
             ("Is my Trash empty?", "get_trash_status", {}),
             (
                 "Search Google for laptops",
-                "browser_search",
-                {"service": "google", "query": "laptops"},
+                "search_web",
+                {
+                    "query": "laptops",
+                    "search_engine": "google",
+                    "profile_id": "personal",
+                },
             ),
             ("Show your status", "show_status", {}),
         ]
@@ -73,11 +211,10 @@ class LocalRouterTests(unittest.TestCase):
             contextual.tool_calls,
             [
                 LocalToolCall(
-                    "browser_search",
+                    "search_youtube",
                     {
-                        "service": "youtube",
                         "query": "how to bake cookies",
-                        "profile": "personal",
+                        "profile_id": "personal",
                     },
                 )
             ],
@@ -92,25 +229,24 @@ class LocalRouterTests(unittest.TestCase):
         self.assertEqual(
             same_query.tool_calls[0].arguments,
             {
-                "service": "google",
                 "query": "how to bake cookies",
-                "profile": "personal",
+                "search_engine": "google",
+                "profile_id": "personal",
             },
         )
         self.assertEqual(
             in_it.tool_calls[0].arguments,
             {
-                "service": "google",
                 "query": "baking cookies",
-                "profile": "personal",
+                "search_engine": "google",
+                "profile_id": "personal",
             },
         )
         self.assertEqual(
             youtube.tool_calls[0].arguments,
             {
-                "service": "youtube",
                 "query": "ssundee",
-                "profile": "personal",
+                "profile_id": "personal",
             },
         )
 
@@ -123,7 +259,7 @@ class LocalRouterTests(unittest.TestCase):
         self.assertEqual(result.result_type, RouterResultType.CLARIFICATION)
         self.assertEqual(result.clarification.intent, "browser_search")
         self.assertEqual(result.clarification.collected_slots, {"query": "dancing"})
-        self.assertEqual(result.clarification.missing_slots, ["service"])
+        self.assertEqual(result.clarification.missing_slots, ["search_engine"])
         self.assertNotEqual(result.message, 'Searching Google for "dancing"')
 
     def test_cloud_delegation_is_explicit(self):
@@ -206,8 +342,8 @@ class LocalRouterTests(unittest.TestCase):
             ("show your status", "show_status", {}),
             (
                 "go to YouTube",
-                "open_service_in_profile",
-                {"service": "youtube", "profile": "personal"},
+                "open_service",
+                {"service_name": "youtube", "profile_id": "personal"},
             ),
         ]
         for text, expected_name, expected_arguments in examples:
@@ -267,8 +403,8 @@ class LocalRouterTests(unittest.TestCase):
             result.tool_calls,
             [
                 LocalToolCall(
-                    "open_service_in_profile",
-                    {"service": "youtube", "profile": "personal"},
+                    "open_service",
+                    {"service_name": "youtube", "profile_id": "personal"},
                 )
             ],
         )
@@ -293,18 +429,18 @@ class LocalRouterTests(unittest.TestCase):
         cases = [
             (
                 "open Albert",
-                "open_service_in_profile",
-                {"service": "albert", "profile": "nyu"},
+                "open_service",
+                {"service_name": "albert", "profile_id": "nyu"},
             ),
             (
                 "open personal Gmail",
-                "open_service_in_profile",
-                {"service": "personal_gmail", "profile": "personal"},
+                "open_service",
+                {"service_name": "personal_gmail", "profile_id": "personal"},
             ),
             (
                 "open NYU Gmail",
-                "open_service_in_profile",
-                {"service": "nyu_gmail", "profile": "nyu"},
+                "open_service",
+                {"service_name": "nyu_gmail", "profile_id": "nyu"},
             ),
             ("show browser profiles", "show_browser_profiles", {}),
             ("list chrome profiles", "show_browser_profiles", {}),

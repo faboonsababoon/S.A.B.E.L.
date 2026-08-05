@@ -1,3 +1,4 @@
+from dataclasses import replace
 import unittest
 
 from sabel.browser_copilot import BrowserCopilot
@@ -18,7 +19,18 @@ class FakeTransport:
         self.requests.append((profile_id, action, arguments))
         if not self.results:
             return BrowserResult.failed("No mocked browser result remains.", "NO_RESULT")
-        return self.results.pop(0)
+        result = self.results.pop(0)
+        payload = dict(result.result)
+        if "url" in arguments and "url" not in payload:
+            payload["url"] = arguments["url"]
+        return replace(
+            result,
+            result=payload,
+            profile_id=result.profile_id or profile_id,
+            connection_instance_id=(
+                result.connection_instance_id or f"{profile_id}-instance"
+            ),
+        )
 
 
 def profile(profile_id, name):
@@ -62,6 +74,137 @@ class ServiceProfileTests(unittest.TestCase):
 
 
 class BrowserCopilotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_profile_report_is_stable_and_predictably_sorted(self):
+        copilot = BrowserCopilot(
+            FakeTransport([profile("nyu", "NYU"), profile("personal", "Personal")])
+        )
+        self.assertEqual(
+            copilot.show_profiles().message,
+            "Connected browser profiles\n- Personal (personal)\n- NYU (nyu)",
+        )
+
+    async def test_profile_state_and_search_dispatch_remain_isolated(self):
+        transport = FakeTransport(
+            [profile("nyu", "NYU"), profile("personal", "Personal")],
+            [
+                success({"tab_id": 11, "url": "https://www.youtube.com/"}),
+                success(
+                    {
+                        "tab_id": 11,
+                        "url": "https://www.youtube.com/results?search_query=matt+rober",
+                    }
+                ),
+                success(
+                    {
+                        "tab_id": 12,
+                        "url": "https://www.google.com/search?q=matie+stone",
+                    }
+                ),
+                success(
+                    {
+                        "tab_id": 21,
+                        "url": "https://www.google.com/search?q=green+water+bottles",
+                    }
+                ),
+            ],
+        )
+        copilot = BrowserCopilot(transport)
+
+        opened = await copilot.open_service("youtube", "nyu")
+        same_profile = await copilot.search_youtube("matt rober", "nyu")
+        nyu_google = await copilot.search_web("matie stone", "google", "nyu")
+        personal_google = await copilot.search_web(
+            "green water bottles", "google", "personal"
+        )
+
+        self.assertTrue(all(item.verified for item in (opened, same_profile, nyu_google, personal_google)))
+        self.assertEqual(transport.requests[1][0:2], ("nyu", "browser_navigate"))
+        self.assertEqual(transport.requests[1][2]["tab_id"], 11)
+        self.assertEqual(transport.requests[2][0:2], ("nyu", "browser_open_tab"))
+        self.assertEqual(transport.requests[3][0:2], ("personal", "browser_open_tab"))
+        self.assertEqual(copilot.browser_state_by_profile["nyu"].active_tab_id, 12)
+        self.assertEqual(copilot.browser_state_by_profile["personal"].active_tab_id, 21)
+        self.assertEqual(
+            copilot.browser_state_by_profile["personal"].last_search_query,
+            "green water bottles",
+        )
+        self.assertNotEqual(
+            copilot.browser_state_by_profile["nyu"].last_search_query,
+            copilot.browser_state_by_profile["personal"].last_search_query,
+        )
+
+    async def test_wrong_profile_or_provider_result_is_never_success(self):
+        wrong_profile = BrowserResult(
+            BrowserActionState.EXECUTED,
+            True,
+            result={
+                "tab_id": 1,
+                "url": "https://www.google.com/search?q=cats",
+            },
+            profile_id="nyu",
+        )
+        wrong_provider = BrowserResult(
+            BrowserActionState.EXECUTED,
+            True,
+            result={
+                "tab_id": 2,
+                "url": "https://www.youtube.com/results?search_query=cats",
+            },
+            profile_id="personal",
+        )
+        transport = FakeTransport(
+            [profile("personal", "Personal"), profile("nyu", "NYU")],
+            [wrong_profile, wrong_provider],
+        )
+        copilot = BrowserCopilot(transport)
+
+        first = await copilot.search_web("cats", "google", "personal")
+        second = await copilot.search_web("cats", "google", "personal")
+
+        self.assertFalse(first.success)
+        self.assertIn("wrong Chrome profile", first.message)
+        self.assertFalse(second.success)
+        self.assertIn("did not return", second.message)
+        self.assertEqual(copilot.browser_state_by_profile["personal"].active_tab_id, None)
+
+    async def test_timeout_does_not_update_profile_state(self):
+        transport = FakeTransport(
+            [profile("personal", "Personal")],
+            [BrowserResult.failed("Timed out.", "COMMAND_TIMEOUT")],
+        )
+        copilot = BrowserCopilot(transport)
+        outcome = await copilot.search_web("cats", "google", "personal")
+        self.assertFalse(outcome.success)
+        self.assertIsNone(
+            copilot.browser_state_by_profile["personal"].last_successful_action
+        )
+
+    async def test_stale_same_profile_tab_safely_opens_a_new_tab(self):
+        transport = FakeTransport(
+            [profile("personal", "Personal")],
+            [
+                success({"tab_id": 7, "url": "https://www.google.com/"}),
+                BrowserResult.failed("The tab closed.", "TAB_NOT_FOUND"),
+                success(
+                    {
+                        "tab_id": 8,
+                        "url": "https://www.google.com/search?q=cats",
+                    }
+                ),
+            ],
+        )
+        copilot = BrowserCopilot(transport)
+        await copilot.open_service("google", "personal")
+        outcome = await copilot.search_web("cats", "google", "personal")
+        self.assertTrue(outcome.verified)
+        self.assertEqual(
+            [request[1] for request in transport.requests],
+            ["browser_open_tab", "browser_navigate", "browser_open_tab"],
+        )
+        self.assertEqual(
+            copilot.browser_state_by_profile["personal"].active_tab_id, 8
+        )
+
     async def test_services_use_exact_profiles_and_remain_separate(self):
         transport = FakeTransport(
             [profile("personal", "Personal"), profile("nyu", "NYU")],

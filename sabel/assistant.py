@@ -5,6 +5,7 @@ from enum import Enum
 import re
 from typing import Callable, Optional
 
+from sabel.application_catalog import ApplicationCatalog
 from sabel.cloud_router import CloudRouter
 from sabel.config import Settings
 from sabel.conversation_state import ConversationState
@@ -22,7 +23,8 @@ from sabel.local_router import (
 from sabel.ollama_client import OllamaClient
 from sabel.openai_research import OpenAIResearchService
 from sabel.response_renderer import render_visible_response
-from sabel.services import resolve_profile_service
+from sabel.request_models import Intent, ResolvedRequest
+from sabel.request_resolution import extract_locked_constraints
 from sabel.tool_dispatcher import DispatchResult, ToolDispatcher
 
 
@@ -65,18 +67,23 @@ class SabelAssistant:
         dispatcher: Optional[ToolDispatcher] = None,
         cloud_router: Optional[CloudRouter] = None,
         browser_runtime=None,
+        application_catalog: Optional[ApplicationCatalog] = None,
     ) -> None:
         self.settings = settings
         self.state = state or ConversationState(
             settings.history_limit,
             settings.pending_action_ttl,
             settings.clarification_ttl,
+            settings.browser_reference_ttl,
         )
         self.ollama_client = ollama_client or OllamaClient(settings)
+        self.application_catalog = application_catalog or ApplicationCatalog()
         self.local_router = local_router or LocalRouter(
             self.ollama_client,
             self.state,
             settings.default_music_service,
+            settings.default_search_engine,
+            application_catalog=self.application_catalog,
         )
         self.pending_router = pending_router or PendingActionRouter(
             self.ollama_client, self.state
@@ -89,6 +96,7 @@ class SabelAssistant:
             self.state,
             self.ollama_client.is_available,
             browser_runtime=browser_runtime,
+            application_catalog=self.application_catalog,
         )
         self.cloud_router = cloud_router or CloudRouter(
             settings,
@@ -122,11 +130,18 @@ class SabelAssistant:
             prefixes.append("The pending Trash action expired and was cancelled.")
         if self.state.clear_expired_clarification() is not None:
             prefixes.append("The previous clarification expired.")
+        if self.state.clear_expired_media_request() is not None:
+            prefixes.append("The previous media request expired.")
         if self.state.clear_expired_cloud_fallback() is not None:
             prefixes.append("The previous research fallback choice expired.")
 
         if self.state.pending_destructive_action is not None:
             return self._handle_pending_destructive(
+                user_text, normalized, approval_callback, prefixes
+            )
+
+        if self.state.pending_media_request is not None:
+            return self._handle_pending_media(
                 user_text, normalized, approval_callback, prefixes
             )
 
@@ -166,6 +181,76 @@ class SabelAssistant:
             visible_user_text=user_text,
             approval_callback=approval_callback,
             prefixes=prefixes,
+        )
+
+    def _handle_pending_media(
+        self,
+        user_text: str,
+        normalized: str,
+        approval_callback: Optional[Callable[[str], str]],
+        prefixes: list[str],
+    ) -> AssistantResult:
+        pending = self.state.pending_media_request
+        if pending is None:
+            return self._handle_normal(user_text, user_text, approval_callback, prefixes)
+        if normalized in CANCEL_WORDS:
+            self.state.clear_pending_media_request()
+            return self._visible(
+                user_text,
+                _join_prefixes(prefixes, "Cancelled."),
+                AssistantResultType.RESPONSE,
+            )
+        locked = extract_locked_constraints(user_text)
+        words = set(re.findall(r"[a-z]+", normalized))
+        if "youtube" in words:
+            service = "youtube"
+        elif "spotify" in words:
+            service = "spotify"
+        else:
+            # A clear unrelated imperative replaces, rather than contaminates, the media request.
+            if re.search(r"\b(?:open|search|show|clear|empty|research|exit|quit)\b", normalized):
+                self.state.clear_pending_media_request()
+                prefixes.append("Cancelled the previous media request.")
+                return self._handle_normal(user_text, user_text, approval_callback, prefixes)
+            return self._visible(
+                user_text,
+                _join_prefixes(prefixes, "Please choose Spotify or YouTube, or say cancel."),
+                AssistantResultType.CLARIFICATION,
+            )
+        profile = locked.profile_id or pending.profile_id or "personal"
+        if service == "youtube":
+            request = ResolvedRequest(
+                Intent.SEARCH_YOUTUBE,
+                service="youtube",
+                search_engine="youtube",
+                query=pending.query,
+                profile_id=profile,
+                source_turn_id="pending-media",
+                raw_input=user_text,
+                locked=locked,
+                resolution_trace=("pending media query restored", "clarification fields merged"),
+            )
+            name = "search_youtube"
+            arguments = {"query": pending.query, "profile_id": profile}
+        else:
+            request = ResolvedRequest(
+                Intent.OPEN_SPOTIFY_SEARCH,
+                service="spotify",
+                query=pending.query,
+                source_turn_id="pending-media",
+                raw_input=user_text,
+                locked=locked,
+                resolution_trace=("pending media query restored", "Spotify selected"),
+            )
+            name = "open_spotify_search"
+            arguments = {"query": pending.query}
+        self.state.clear_pending_media_request()
+        self.state.begin_action(request)
+        dispatched = self.dispatcher.dispatch(
+            name, arguments, user_text, approval_callback
+        )
+        return self._render_dispatch(
+            user_text, dispatched, 0.0, prefixes, resolved_request=request
         )
 
     def _handle_pending_cloud_fallback(
@@ -405,31 +490,63 @@ class SabelAssistant:
             "open_spotify_search": ("query",),
             "open_youtube_search": ("query",),
             "open_application": ("application_name",),
-            "open_service": ("service_name",),
             "open_website": ("url",),
             "open_service_in_profile": ("service", "profile"),
+            "open_service": ("service_name", "profile_id"),
+            "search_web": ("query", "search_engine", "profile_id"),
+            "search_youtube": ("query", "profile_id"),
         }
         required = argument_keys.get(intent)
         if intent == "browser_search":
-            service = slots.get("service")
+            service = slots.get("search_engine") or slots.get("service")
             query = slots.get("query")
-            profile = slots.get("profile")
+            profile = slots.get("profile_id") or slots.get("profile")
             if (
                 isinstance(service, str)
-                and service in {"google", "youtube"}
+                and service in {"google", "bing", "duckduckgo", "youtube"}
                 and isinstance(query, str)
                 and query.strip()
-                and (profile is None or profile in {"personal", "nyu"})
+                and profile in {"personal", "nyu"}
             ):
-                arguments = {"service": service, "query": query.strip()}
-                if isinstance(profile, str):
-                    arguments["profile"] = profile
+                if service == "youtube":
+                    resolved_intent = "search_youtube"
+                    arguments = {
+                        "query": query.strip(),
+                        "profile_id": profile,
+                    }
+                else:
+                    resolved_intent = "search_web"
+                    arguments = {
+                        "query": query.strip(),
+                        "search_engine": service,
+                        "profile_id": profile,
+                    }
                 self.state.clear_pending_clarification()
                 dispatched = self.dispatcher.dispatch(
-                    intent, arguments, user_text, approval_callback
+                    resolved_intent, arguments, user_text, approval_callback
                 )
                 return self._render_dispatch(
                     user_text, dispatched, duration_ms, prefixes
+                )
+            if isinstance(query, str) and query.strip():
+                if profile not in {"personal", "nyu"}:
+                    question = "Which Chrome profile should I use: Personal or NYU?"
+                    missing = ["profile_id"]
+                else:
+                    question = f"Should I search Google or YouTube for “{query.strip()}”?"
+                    missing = ["search_engine"]
+                self.state.set_pending_clarification(
+                    original_request,
+                    question,
+                    intent="browser_search",
+                    collected_slots=slots,
+                    missing_slots=missing,
+                )
+                return self._visible(
+                    user_text,
+                    _join_prefixes(prefixes, question),
+                    AssistantResultType.CLARIFICATION,
+                    duration_ms,
                 )
         if required and all(isinstance(slots.get(key), str) and slots[key] for key in required):
             arguments = {key: slots[key] for key in required}
@@ -455,6 +572,9 @@ class SabelAssistant:
         approval_callback: Optional[Callable[[str], str]],
         prefixes: list[str],
     ) -> AssistantResult:
+        locked = extract_locked_constraints(routing_text)
+        if locked.correction:
+            self.state.reject_last_attempt()
         try:
             result = self.local_router.route(routing_text)
         except OllamaUnavailableError as error:
@@ -477,14 +597,35 @@ class SabelAssistant:
                 missing_slots=[result.expected_slot] if result.expected_slot else [],
             )
             question = clarification.question
-            self.state.set_pending_clarification(
-                routing_text,
-                question,
-                intent=clarification.intent,
-                collected_slots=clarification.collected_slots,
-                missing_slots=clarification.missing_slots,
-                proposed_slots=clarification.proposed_slots,
-            )
+            if clarification.intent == "media_search":
+                query = clarification.collected_slots.get("query")
+                if isinstance(query, str) and query.strip():
+                    profile = clarification.collected_slots.get("profile_id")
+                    self.state.set_pending_media_request(
+                        query=query.strip(),
+                        service=None,
+                        profile_id=profile if profile in {"personal", "nyu"} else None,
+                        missing_fields=set(clarification.missing_slots or ["service"]),
+                        proposed_values=clarification.proposed_slots,
+                    )
+                else:
+                    self.state.set_pending_clarification(
+                        routing_text,
+                        question,
+                        intent=clarification.intent,
+                        collected_slots=clarification.collected_slots,
+                        missing_slots=clarification.missing_slots,
+                        proposed_slots=clarification.proposed_slots,
+                    )
+            else:
+                self.state.set_pending_clarification(
+                    routing_text,
+                    question,
+                    intent=clarification.intent,
+                    collected_slots=clarification.collected_slots,
+                    missing_slots=clarification.missing_slots,
+                    proposed_slots=clarification.proposed_slots,
+                )
             return self._visible(
                 visible_user_text,
                 _join_prefixes(prefixes, question),
@@ -507,6 +648,8 @@ class SabelAssistant:
             )
 
         call = result.tool_calls[0]
+        if result.resolved_request is not None:
+            self.state.begin_action(result.resolved_request)
         dispatched = self.dispatcher.dispatch(
             call.name,
             call.arguments,
@@ -530,7 +673,11 @@ class SabelAssistant:
                 cloud.usage,
             )
         return self._render_dispatch(
-            visible_user_text, dispatched, result.duration_ms, prefixes
+            visible_user_text,
+            dispatched,
+            result.duration_ms,
+            prefixes,
+            resolved_request=result.resolved_request,
         )
 
     def _render_dispatch(
@@ -539,6 +686,7 @@ class SabelAssistant:
         dispatched: DispatchResult,
         local_ms: float,
         prefixes: list[str],
+        resolved_request: Optional[ResolvedRequest] = None,
     ) -> AssistantResult:
         message = render_visible_response(dispatched.message, INTERNAL_TOOL_NAMES)
         if dispatched.clarification_intent:
@@ -565,6 +713,15 @@ class SabelAssistant:
             )
             if dispatched.action_success:
                 self._record_browser_context(dispatched)
+            if resolved_request is not None:
+                self.state.complete_action(
+                    resolved_request,
+                    success=dispatched.action_success,
+                    verified=dispatched.verified,
+                    message=message,
+                    browser_context=dispatched.browser_context,
+                    browser_debug=dispatched.browser_debug,
+                )
         result_type = (
             AssistantResultType.EXIT
             if dispatched.should_exit
@@ -578,38 +735,15 @@ class SabelAssistant:
             dispatched.selected_tool,
             dispatched.validated_arguments,
             should_exit=dispatched.should_exit,
+            browser_debug=dispatched.browser_debug,
+            resolved_request=resolved_request,
+            application_debug=dispatched.application_debug,
         )
 
     def _record_browser_context(self, dispatched: DispatchResult) -> None:
-        arguments = dispatched.validated_arguments or {}
-        tool = dispatched.selected_tool
-        service = None
-        profile = None
-        query = None
-        if tool == "browser_search":
-            service = arguments.get("service")
-            profile = arguments.get("profile") or "personal"
-            query = arguments.get("query")
-        elif tool == "open_service_in_profile":
-            resolution = resolve_profile_service(str(arguments.get("service") or ""))
-            service = resolution.service_name
-            profile = arguments.get("profile") or (
-                resolution.service.default_profile if resolution.service else None
-            )
-        elif tool == "open_website":
-            address = str(arguments.get("url") or "").casefold()
-            if "google.com" in address:
-                service = "google"
-            elif "youtube.com" in address:
-                service = "youtube"
-        elif tool == "open_youtube_search":
-            service = "youtube"
-            query = arguments.get("query")
-        if service in {"google", "youtube"}:
-            self.state.record_browser_context(
-                service,
-                profile if profile in {"personal", "nyu"} else None,
-                str(query) if isinstance(query, str) else None,
+        if dispatched.verified and dispatched.browser_context is not None:
+            self.state.record_verified_browser_context(
+                dispatched.browser_context
             )
 
     def _visible(
@@ -623,13 +757,24 @@ class SabelAssistant:
         cloud_ms: float = 0.0,
         usage=None,
         should_exit: bool = False,
+        browser_debug=None,
+        resolved_request: Optional[ResolvedRequest] = None,
+        application_debug=None,
     ) -> AssistantResult:
         safe_message = render_visible_response(message, INTERNAL_TOOL_NAMES)
         self.state.add_exchange(user_text, safe_message)
         return AssistantResult(
             result_type,
             self._debug(
-                safe_message, local_ms, tool, arguments, cloud_ms, usage
+                safe_message,
+                local_ms,
+                tool,
+                arguments,
+                cloud_ms,
+                usage,
+                browser_debug,
+                resolved_request,
+                application_debug,
             ),
             should_exit,
         )
@@ -642,6 +787,9 @@ class SabelAssistant:
         arguments,
         cloud_ms: float = 0.0,
         usage=None,
+        browser_debug=None,
+        resolved_request: Optional[ResolvedRequest] = None,
+        application_debug=None,
     ) -> str:
         if not self.settings.debug:
             return message
@@ -657,6 +805,50 @@ class SabelAssistant:
                     f"[debug] Cloud request: {cloud_ms:.1f} ms",
                     f"[debug] Token usage: {usage or 'not reported'}",
                 ]
+            )
+        if browser_debug:
+            target_tab = browser_debug.get("target_tab")
+            lines.extend(
+                [
+                    f"[debug] Resolved profile: {browser_debug.get('profile')}",
+                    f"[debug] Resolved provider: {browser_debug.get('provider') or 'none'}",
+                    f"[debug] Resolved query: {browser_debug.get('query') or 'none'}",
+                    f"[debug] Target connection: {browser_debug.get('target_connection')}",
+                    f"[debug] Target tab: {target_tab if target_tab is not None else 'new'}",
+                    f"[debug] Generated URL: {browser_debug.get('generated_url')}",
+                    f"[debug] Request ID: {browser_debug.get('request_id') or 'not available'}",
+                    f"[debug] Extension result profile: {browser_debug.get('result_profile')}",
+                    f"[debug] Result URL: {browser_debug.get('result_url') or browser_debug.get('generated_url')}",
+                    f"[debug] Verification: {browser_debug.get('verification') or ('passed' if browser_debug.get('result_profile') else 'not available')}",
+                    f"[debug] Error code: {browser_debug.get('error_code') or 'none'}",
+                ]
+            )
+        if resolved_request is not None:
+            locked = resolved_request.locked
+            lines.extend(
+                [
+                    f"[debug] Turn ID: {resolved_request.source_turn_id or 'unknown'}",
+                    f"[debug] Raw input: {resolved_request.raw_input or ''}",
+                    f"[debug] Intent: {resolved_request.intent.value}",
+                    f"[debug] Locked profile: {locked.profile_id or 'none'}",
+                    f"[debug] Locked provider/service: {locked.search_engine or locked.service or 'none'}",
+                    f"[debug] Explicit application intent: {str(locked.explicit_application_intent).lower()}",
+                    f"[debug] Context reference: {locked.context_reference or 'none'}",
+                    f"[debug] Model intent: {resolved_request.model_intent or 'none'}",
+                ]
+            )
+        if application_debug:
+            lines.append(
+                f"[debug] Requested application: {application_debug.get('requested_application')}"
+            )
+            for candidate in application_debug.get("candidates", [])[:8]:
+                lines.append(
+                    "[debug] Application candidate: "
+                    f"{candidate.get('display_name')} — score {candidate.get('score'):.2f} — "
+                    f"{'accepted' if candidate.get('accepted') else 'rejected'}: {candidate.get('reason')}"
+                )
+            lines.append(
+                f"[debug] Selected application: {application_debug.get('selected_application') or 'none'}"
             )
         return "\n".join(lines + [message])
 

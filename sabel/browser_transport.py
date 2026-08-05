@@ -39,12 +39,39 @@ class BrowserTransport(Protocol):
 
 
 @dataclass
-class _ConnectionState:
+class BrowserProfileConnection:
+    """One fully authenticated extension connection for one exact profile."""
+
     websocket: Any
     profile: BrowserProfile
     limiter: SlidingWindowRateLimiter
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
+    last_heartbeat: float = field(default_factory=time.time)
+
+    @property
+    def profile_id(self) -> str:
+        return self.profile.profile_id
+
+    @property
+    def profile_name(self) -> str:
+        return self.profile.profile_name
+
+    @property
+    def instance_id(self) -> str:
+        return self.profile.instance_id
+
+    @property
+    def connected_at(self) -> float:
+        return self.profile.connected_at
+
+    @property
+    def extension_version(self) -> str:
+        return self.profile.extension_version
+
+
+# Compatibility name for older tests and integrations.
+_ConnectionState = BrowserProfileConnection
 
 
 class WebSocketBrowserTransport:
@@ -88,7 +115,9 @@ class WebSocketBrowserTransport:
         self.logger = logger or logging.getLogger("sabel.browser_bridge")
         self._server = None
         self._token: Optional[str] = None
-        self._connections: dict[str, _ConnectionState] = {}
+        self.connections: dict[str, BrowserProfileConnection] = {}
+        self._connections = self.connections
+        self._profile_snapshot: tuple[BrowserProfile, ...] = ()
         self._registry_lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -129,9 +158,15 @@ class WebSocketBrowserTransport:
         self.logger.info("browser_token_rotated")
 
     def connected_profiles(self) -> list[BrowserProfile]:
-        return sorted(
-            [state.profile for state in self._connections.values()],
-            key=lambda profile: profile.profile_id,
+        return list(self._profile_snapshot)
+
+    def _refresh_profile_snapshot_locked(self) -> None:
+        order = {"personal": 0, "nyu": 1}
+        self._profile_snapshot = tuple(
+            sorted(
+                (state.profile for state in self.connections.values()),
+                key=lambda profile: (order.get(profile.profile_id, 99), profile.profile_id),
+            )
         )
 
     async def _process_request(self, connection, request):
@@ -163,7 +198,7 @@ class WebSocketBrowserTransport:
                 instance_id=str(registration["instance_id"]),
                 extension_version=str(registration["extension_version"]),
             )
-            state = _ConnectionState(
+            state = BrowserProfileConnection(
                 websocket=websocket,
                 profile=profile,
                 limiter=SlidingWindowRateLimiter(
@@ -171,17 +206,18 @@ class WebSocketBrowserTransport:
                 ),
                 semaphore=asyncio.Semaphore(self.max_concurrent_requests),
             )
-            await self._register_connection(state)
-            await websocket.send(
-                json.dumps(
-                    server_message(
-                        "registered",
-                        str(registration["request_id"]),
-                        profile_id=profile.profile_id,
-                        profile_name=profile.profile_name,
-                    )
-                )
+            registered = await self._register_connection(
+                state, registration_request_id=str(registration["request_id"])
             )
+            if not registered:
+                self.logger.warning(
+                    "browser_profile_conflict profile=%s", profile.profile_id
+                )
+                await websocket.close(
+                    code=4001,
+                    reason="Profile ID already belongs to another extension instance",
+                )
+                return
             async for raw_message in websocket:
                 if not state.limiter.allow():
                     self.logger.warning(
@@ -224,38 +260,68 @@ class WebSocketBrowserTransport:
             raise ProtocolError("Browser message exceeds the size limit.", "MESSAGE_TOO_LARGE")
         return decode_json(raw)
 
-    async def _register_connection(self, state: _ConnectionState) -> None:
+    async def _register_connection(
+        self,
+        state: BrowserProfileConnection,
+        registration_request_id: Optional[str] = None,
+    ) -> bool:
+        """Atomically register after authentication.
+
+        A reconnect from the same extension instance replaces its stale socket.
+        A different instance claiming an occupied profile ID is rejected so one
+        misconfigured Chrome profile cannot evict another installation.
+        """
+        previous = None
         async with self._registry_lock:
-            previous = self._connections.get(state.profile.profile_id)
-            self._connections[state.profile.profile_id] = state
+            previous = self.connections.get(state.profile_id)
+            if previous is not None and previous.instance_id != state.instance_id:
+                return False
+            if registration_request_id is not None:
+                await state.websocket.send(
+                    json.dumps(
+                        server_message(
+                            "registered",
+                            registration_request_id,
+                            profile_id=state.profile_id,
+                            profile_name=state.profile_name,
+                        )
+                    )
+                )
+            self.connections[state.profile_id] = state
+            self._refresh_profile_snapshot_locked()
         if previous is not None and previous is not state:
             self._fail_pending(previous, "Browser profile reconnected.", "PROFILE_REPLACED")
-            await previous.websocket.close(code=4001, reason="New profile connection")
+            await previous.websocket.close(code=4002, reason="Newer instance connection")
         self.logger.info(
             "browser_profile_connected profile=%s", state.profile.profile_id
         )
+        return True
 
-    async def _remove_connection(self, state: _ConnectionState) -> None:
+    async def _remove_connection(self, state: BrowserProfileConnection) -> None:
         async with self._registry_lock:
-            if self._connections.get(state.profile.profile_id) is state:
-                self._connections.pop(state.profile.profile_id, None)
+            if self.connections.get(state.profile.profile_id) is state:
+                self.connections.pop(state.profile.profile_id, None)
+                self._refresh_profile_snapshot_locked()
         self._fail_pending(state, "Browser profile disconnected.", "PROFILE_DISCONNECTED")
         self.logger.info(
             "browser_profile_disconnected profile=%s", state.profile.profile_id
         )
 
-    def _fail_pending(self, state: _ConnectionState, message: str, code: str) -> None:
+    def _fail_pending(
+        self, state: BrowserProfileConnection, message: str, code: str
+    ) -> None:
         for future in list(state.pending.values()):
             if not future.done():
                 future.set_result(BrowserResult.failed(message, code))
         state.pending.clear()
 
     async def _handle_authenticated_message(
-        self, state: _ConnectionState, message: dict[str, object]
+        self, state: BrowserProfileConnection, message: dict[str, object]
     ) -> None:
         if message["profile_id"] != state.profile.profile_id:
             raise ProtocolError("Profile ID does not match this connection.", "PROFILE_MISMATCH")
         if message["type"] == "heartbeat":
+            state.last_heartbeat = time.time()
             await state.websocket.send(
                 json.dumps(
                     server_message(
@@ -284,6 +350,8 @@ class WebSocketBrowserTransport:
                 verified=verified,
                 result=result_data,
                 request_id=request_id,
+                profile_id=state.profile_id,
+                connection_instance_id=state.instance_id,
             )
         else:
             error_data = error if isinstance(error, dict) else {}
@@ -304,11 +372,18 @@ class WebSocketBrowserTransport:
         except ProtocolError as error:
             self.logger.warning("browser_unknown_action code=%s", error.code)
             return BrowserResult.failed(str(error), error.code)
-        state = self._connections.get(profile_id)
+        async with self._registry_lock:
+            state = self.connections.get(profile_id)
         if state is None:
-            label = "NYU" if profile_id == "nyu" else "Personal" if profile_id == "personal" else profile_id
+            label = (
+                "NYU"
+                if profile_id == "nyu"
+                else "Personal"
+                if profile_id == "personal"
+                else profile_id
+            )
             return BrowserResult.failed(
-                f"The {label} browser profile is not currently connected.",
+                f"Your {label} Chrome profile is not connected.",
                 "PROFILE_DISCONNECTED",
             )
         async with state.semaphore:
@@ -343,8 +418,10 @@ class WebSocketBrowserTransport:
                 state.pending.pop(request_id, None)
 
     async def disconnect_all(self, reason: str) -> None:
-        states = list(self._connections.values())
-        self._connections.clear()
+        async with self._registry_lock:
+            states = list(self.connections.values())
+            self.connections.clear()
+            self._refresh_profile_snapshot_locked()
         for state in states:
             self._fail_pending(state, reason, "CANCELLED")
             try:

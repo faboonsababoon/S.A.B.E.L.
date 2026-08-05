@@ -60,6 +60,18 @@ class FakeWebSocket:
         self.release.set()
 
 
+class BlockingSendWebSocket(FakeWebSocket):
+    def __init__(self):
+        super().__init__(wait_after=True)
+        self.send_started = asyncio.Event()
+        self.allow_send = asyncio.Event()
+
+    async def send(self, value):
+        self.send_started.set()
+        await self.allow_send.wait()
+        self.sent.append(value)
+
+
 class FakeServer:
     def __init__(self):
         self.closed = False
@@ -175,10 +187,120 @@ class BrowserTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transport.connected_profiles())
         self.assertEqual((await future).error_code, "PROFILE_DISCONNECTED")
 
+    async def test_profile_registry_is_simultaneous_sorted_and_profile_isolated(self):
+        transport = self.transport()
+        personal = _ConnectionState(
+            FakeWebSocket(wait_after=True),
+            BrowserProfile("personal", "Personal", "personal-1", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        nyu = _ConnectionState(
+            FakeWebSocket(wait_after=True),
+            BrowserProfile("nyu", "NYU", "nyu-1", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+
+        await asyncio.gather(
+            transport._register_connection(nyu),
+            transport._register_connection(personal),
+        )
+        self.assertEqual(
+            [item.profile_id for item in transport.connected_profiles()],
+            ["personal", "nyu"],
+        )
+        await transport._remove_connection(nyu)
+        self.assertEqual(
+            [item.profile_id for item in transport.connected_profiles()],
+            ["personal"],
+        )
+
+    async def test_duplicate_instance_policy_is_predictable(self):
+        transport = self.transport()
+        first = _ConnectionState(
+            FakeWebSocket(wait_after=True),
+            BrowserProfile("personal", "Personal", "same-instance", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        reconnect = _ConnectionState(
+            FakeWebSocket(wait_after=True),
+            BrowserProfile("personal", "Personal", "same-instance", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        conflicting = _ConnectionState(
+            FakeWebSocket(wait_after=True),
+            BrowserProfile("personal", "Personal", "different-instance", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        self.assertTrue(await transport._register_connection(first))
+        self.assertTrue(await transport._register_connection(reconnect))
+        self.assertTrue(first.websocket.closed)
+        self.assertEqual(first.websocket.close_code, 4002)
+        self.assertFalse(await transport._register_connection(conflicting))
+        self.assertIs(transport.connections["personal"], reconnect)
+
+    async def test_partially_acknowledged_registration_is_not_listed(self):
+        transport = self.transport()
+        websocket = BlockingSendWebSocket()
+        state = _ConnectionState(
+            websocket,
+            BrowserProfile("nyu", "NYU", "nyu-instance", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        registering = asyncio.create_task(
+            transport._register_connection(
+                state, registration_request_id="register-nyu"
+            )
+        )
+        await websocket.send_started.wait()
+        self.assertEqual(transport.connected_profiles(), [])
+        websocket.allow_send.set()
+        self.assertTrue(await registering)
+        self.assertEqual(transport.connected_profiles()[0].profile_id, "nyu")
+
+    async def test_command_uses_only_the_exact_requested_connection(self):
+        transport = self.transport(command_timeout=1.0)
+        personal_socket = FakeWebSocket(wait_after=True)
+        nyu_socket = FakeWebSocket(wait_after=True)
+        personal = _ConnectionState(
+            personal_socket,
+            BrowserProfile("personal", "Personal", "personal-1", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        nyu = _ConnectionState(
+            nyu_socket,
+            BrowserProfile("nyu", "NYU", "nyu-1", "0.1.0"),
+            SlidingWindowRateLimiter(30, 10),
+        )
+        await transport._register_connection(personal)
+        await transport._register_connection(nyu)
+        pending = asyncio.create_task(
+            transport.send_request("personal", "browser_list_tabs", {})
+        )
+        while not personal_socket.sent:
+            await asyncio.sleep(0)
+        command = json.loads(personal_socket.sent[0])
+        self.assertEqual(command["profile_id"], "personal")
+        self.assertEqual(nyu_socket.sent, [])
+        await transport._handle_authenticated_message(
+            personal,
+            {
+                "protocol_version": 1,
+                "type": "response",
+                "request_id": command["request_id"],
+                "profile_id": "personal",
+                "success": True,
+                "result": {"tabs": [], "verified": True},
+                "error": None,
+            },
+        )
+        result = await pending
+        self.assertEqual(result.profile_id, "personal")
+        self.assertEqual(result.connection_instance_id, "personal-1")
+
     async def test_disconnected_profile_and_command_timeout_are_readable(self):
         transport = self.transport(command_timeout=0.01)
         missing = await transport.send_request("nyu", "browser_list_tabs", {})
-        self.assertIn("NYU", missing.error)
+        self.assertEqual(missing.error, "Your NYU Chrome profile is not connected.")
 
         websocket = FakeWebSocket(wait_after=True)
         state = _ConnectionState(
