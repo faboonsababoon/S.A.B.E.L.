@@ -16,6 +16,7 @@ from sabel.browser_routing import (
     validate_search_query,
 )
 from sabel.conversation_state import ConversationState
+from sabel.media import parse_media_request
 from sabel.request_models import Intent, LockedConstraints, ResolvedRequest
 from sabel.services import resolve_profile_service, service_mentioned
 
@@ -54,7 +55,39 @@ _NAMED_YOUTUBE_CONTENT = re.compile(
     r"(?P<query>.+?)\s+(?:on|in|using)\s+youtube(?:\.com)?\b(?P<tail>.*)$",
     re.I,
 )
-_MEDIA = re.compile(r"^\s*(?:please\s+)?(?:play|listen\s+to)\s+(?P<query>.+?)\s*[.!?]*$", re.I)
+_APPLICATION_LIST = re.compile(
+    r"^\s*(?:(?:show|list)(?:\s+me)?|what|which)\s+"
+    r"(?:all\s+)?(?:of\s+)?(?:my\s+|the\s+)?(?:installed\s+)?"
+    r"(?:applications|apps)(?:\s+(?:are\s+)?installed)?"
+    r"(?:\s+on\s+(?:my\s+)?(?:mac|laptop|computer))?\s*[.!?]*$",
+    re.I,
+)
+_APPLICATION_CHECK_PATTERNS = (
+    re.compile(
+        r"^\s*(?:is|are)\s+(?P<target>.+?)\s+"
+        r"(?:installed|on\s+(?:my\s+)?(?:mac|laptop|computer))\s*[.!?]*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*do\s+i\s+have\s+(?P<target>.+?)\s+installed"
+        r"(?:\s+on\s+(?:my\s+)?(?:mac|laptop|computer))?\s*[.!?]*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*do\s+i\s+have\s+(?P<target>.+?)\s*[.!?]*$",
+        re.I,
+    ),
+    re.compile(
+        r"^\s*(?:check|see|find\s+out)\s+(?:if|whether)\s+"
+        r"(?P<target>.+?)\s+(?:is\s+)?installed\s*[.!?]*$",
+        re.I,
+    ),
+)
+_APPLICATION_PRONOUN = re.compile(
+    r"^\s*(?:please\s+)?(?:open|launch|start|run)\s+"
+    r"(?:it|that|this|the\s+app|the\s+application)(?:\s+please)?\s*[.!?]*$",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -130,6 +163,32 @@ class RequestResolver:
 
         if _FAILURE_REPORT.fullmatch(text.strip()):
             return ResolutionDecision(message=self.state.contextual_failure_message())
+
+        application_inspection = self._application_inspection_request(
+            text, locked, turn_id, model_intent
+        )
+        if application_inspection is not None:
+            return application_inspection
+
+        if _APPLICATION_PRONOUN.fullmatch(text):
+            referenced_application = self.state.current_application_reference()
+            if referenced_application is None:
+                return ResolutionDecision(
+                    message=(
+                        "I do not have a recent application reference for “it.” "
+                        "Please name the application you want to open."
+                    ),
+                )
+            request = ResolvedRequest(
+                intent=Intent.OPEN_APPLICATION,
+                application_name=referenced_application,
+                source_turn_id=turn_id,
+                raw_input=text,
+                model_intent=model_intent,
+                locked=locked,
+                resolution_trace=("resolved application pronoun from local session state",),
+            )
+            return _decision_for(request)
 
         if locked.context_reference == "same" and not re.search(
             r"\b(?:search|look\s+up|find|google)\b", text, re.I
@@ -263,20 +322,48 @@ class RequestResolver:
         )
         return _decision_for(request)
 
+    def _application_inspection_request(
+        self,
+        text: str,
+        locked: LockedConstraints,
+        turn_id: str,
+        model_intent: Optional[str],
+    ) -> Optional[ResolutionDecision]:
+        if _APPLICATION_LIST.fullmatch(text):
+            request = ResolvedRequest(
+                intent=Intent.LIST_APPLICATIONS,
+                source_turn_id=turn_id,
+                raw_input=text,
+                model_intent=model_intent,
+                locked=locked,
+                resolution_trace=("authoritative installed-application inventory",),
+            )
+            return _decision_for(request)
+
+        target = _application_inspection_target(text)
+        if target is None:
+            return None
+        request = ResolvedRequest(
+            intent=Intent.CHECK_APPLICATION,
+            application_name=target,
+            source_turn_id=turn_id,
+            raw_input=text,
+            model_intent=model_intent,
+            locked=locked,
+            resolution_trace=("authoritative installed-application lookup",),
+        )
+        return _decision_for(request)
+
     def _media_request(
         self, text: str, locked: LockedConstraints, turn_id: str
     ) -> Optional[ResolutionDecision]:
-        match = _MEDIA.match(text)
-        if not match:
+        media = parse_media_request(text)
+        if media is None or not media.query:
             return None
-        query = match.group("query").strip()
-        service = locked.service if locked.service in {"youtube", "spotify"} else None
-        if service is None and re.search(
-            r"(?<![a-z0-9])spotify(?![a-z0-9])", text, re.I
-        ):
-            service = "spotify"
-        if service:
-            query = re.sub(r"\s+(?:on|in)\s+(?:youtube|spotify)\s*$", "", query, flags=re.I).strip()
+        query = media.query
+        service = media.service or (
+            locked.service if locked.service in {"youtube", "spotify"} else None
+        )
         service = service or self.default_music_service
         if service == "youtube":
             request = ResolvedRequest(
@@ -378,6 +465,14 @@ class RequestResolver:
 def _decision_for(request: ResolvedRequest) -> ResolutionDecision:
     if request.intent == Intent.OPEN_APPLICATION:
         return ResolutionDecision(request, "open_application", {"application_name": request.application_name or ""})
+    if request.intent == Intent.CHECK_APPLICATION:
+        return ResolutionDecision(
+            request,
+            "check_application_installed",
+            {"application_name": request.application_name or ""},
+        )
+    if request.intent == Intent.LIST_APPLICATIONS:
+        return ResolutionDecision(request, "show_installed_applications", {})
     if request.intent == Intent.OPEN_SERVICE:
         return ResolutionDecision(request, "open_service", {"service_name": request.service or "", "profile_id": request.profile_id or ""})
     if request.intent == Intent.SEARCH_YOUTUBE:
@@ -410,11 +505,25 @@ def _application_target(text: str, quoted: Optional[str]) -> Optional[str]:
         flags=re.I,
     )
     target = re.sub(r"\s+(?:on\s+my\s+laptop|desktop\s+app|application|app)\s*$", "", target, flags=re.I)
+    target = re.sub(r"\s+(?:please|for\s+me)\s*$", "", target, flags=re.I)
     target = re.sub(r"^the\s+", "", target, flags=re.I)
     target = target.strip(' \t"“”\'')
     if target.casefold() in {"it", "that", "this", "the app", "the application"}:
         return None
     return target or None
+
+
+def _application_inspection_target(text: str) -> Optional[str]:
+    for pattern in _APPLICATION_CHECK_PATTERNS:
+        match = pattern.fullmatch(text)
+        if match is None:
+            continue
+        target = _matching_quote(text) or match.group("target")
+        target = re.sub(r"^the\s+", "", target, flags=re.I)
+        target = re.sub(r"\s+(?:application|app)\s*$", "", target, flags=re.I)
+        target = target.strip(' \t"“”\'')
+        return target or None
+    return None
 
 
 def _service_homepage(text: str, locked: LockedConstraints) -> Optional[tuple[str, str]]:

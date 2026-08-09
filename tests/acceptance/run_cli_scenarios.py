@@ -294,6 +294,11 @@ async def run() -> int:
             assert "circles" in media_result.casefold() and "NYU Chrome profile" in media_result, media_result
 
             await sabel.command("search baseline on Google in my Personal profile")
+            same_query = await sabel.command(
+                "now search the same thing on youtube but on personal profile"
+            )
+            assert "baseline" in same_query.casefold(), same_query
+            assert "YouTube" in same_query and "Personal Chrome profile" in same_query, same_query
             for command in (
                 "go to YouTube on my NYU profile",
                 "go to YouTube on my NYU profile",
@@ -304,7 +309,7 @@ async def run() -> int:
 
             personal_destinations = personal.destinations()
             nyu_destinations = nyu.destinations()
-            assert len(personal_destinations) == 2, personal_destinations
+            assert len(personal_destinations) == 3, personal_destinations
             assert all(item["profile_id"] == "personal" for item in personal_destinations)
             assert all(item["profile_id"] == "nyu" for item in nyu_destinations)
 
@@ -325,7 +330,11 @@ async def run() -> int:
             assert [
                 (item["provider"], item["query"])
                 for item in personal_destinations
-            ] == [("google", "fried chickpeas"), ("google", "baseline")]
+            ] == [
+                ("google", "fried chickpeas"),
+                ("google", "baseline"),
+                ("youtube", "baseline"),
+            ]
             for item in personal_destinations + nyu_destinations:
                 query = item["query"]
                 if query:

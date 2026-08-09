@@ -292,6 +292,70 @@ class ToolDispatcher:
 
         if name == "open_website":
             return self._one_string(name, arguments, "url", self.handlers[name])
+        if name == "check_application_installed":
+            if not _valid_keys(arguments, {"application_name"}):
+                return DispatchResult("The application-check arguments were rejected.")
+            supplied_name = arguments.get("application_name")
+            if not isinstance(supplied_name, str):
+                return DispatchResult("The application-check arguments were rejected.")
+            try:
+                application_name = normalize_application_name(supplied_name)
+            except ValueError as error:
+                return DispatchResult(str(error))
+            match = self.application_catalog.resolve(application_name)
+            application_debug = {
+                "requested_application": application_name,
+                "selected_application": (
+                    match.application.display_name if match.application else None
+                ),
+                "candidates": [
+                    {
+                        "display_name": candidate.display_name,
+                        "score": candidate.score,
+                        "accepted": candidate.accepted,
+                        "reason": candidate.reason,
+                    }
+                    for candidate in match.candidates
+                ],
+            }
+            if match.application is not None:
+                display_name = match.application.display_name
+                message = f"Yes—{display_name} is installed."
+            else:
+                display_name = application_name
+                message = match.message or (
+                    f"I could not find an installed application named {application_name}."
+                )
+            return DispatchResult(
+                message,
+                selected_tool=name,
+                validated_arguments={"application_name": display_name},
+                action_success=True,
+                verified=True,
+                application_debug=application_debug,
+            )
+        if name == "show_installed_applications":
+            if arguments:
+                return DispatchResult("The installed-applications tool accepts no arguments.")
+            display_names = sorted(
+                {application.display_name for application in self.application_catalog.applications()},
+                key=str.casefold,
+            )
+            limit = 60
+            visible_names = display_names[:limit]
+            lines = [f"Installed applications ({len(display_names)})"]
+            lines.extend(f"- {display_name}" for display_name in visible_names)
+            if len(display_names) > limit:
+                lines.append(
+                    f"…and {len(display_names) - limit} more. Ask whether a specific application is installed."
+                )
+            return DispatchResult(
+                "\n".join(lines),
+                selected_tool=name,
+                validated_arguments={},
+                action_success=True,
+                verified=True,
+            )
         if name == "open_application":
             if not _valid_keys(arguments, {"application_name"}):
                 return DispatchResult("The application arguments were rejected.")
@@ -328,7 +392,7 @@ class ToolDispatcher:
                         action_success=False,
                         application_debug=application_debug,
                     )
-                execution_name = match.application.bundle_name
+                execution_name = match.application.launch_name
                 display_name = match.application.display_name
             else:
                 execution_name = application_name
@@ -396,7 +460,7 @@ class ToolDispatcher:
             return DispatchResult(
                 "I can use connected Personal and NYU Chrome profiles for reviewed services, "
                 "tab summaries, searches, and verified YouTube channel navigation; open websites "
-                "and apps; show status; "
+                "and installed apps; inspect the installed-app catalog; show status; "
                 "inspect Trash, open stored research sources, and empty Trash after explicit confirmation. "
                 "Complex current research can be delegated according to cloud mode.",
                 selected_tool=name,

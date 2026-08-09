@@ -707,6 +707,13 @@ class SabelAssistant:
             )
         if dispatched.should_exit:
             self.state.clear_all_pending()
+        if dispatched.selected_tool in {
+            "open_application",
+            "check_application_installed",
+        } and dispatched.validated_arguments:
+            application_name = dispatched.validated_arguments.get("application_name")
+            if isinstance(application_name, str) and application_name.strip():
+                self.state.record_application_reference(application_name)
         if dispatched.action_success is not None and dispatched.selected_tool:
             self.state.record_action_result(
                 dispatched.selected_tool, dispatched.action_success, message

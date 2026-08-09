@@ -8,6 +8,8 @@ from typing import Optional
 
 class Intent(Enum):
     OPEN_APPLICATION = "open_application"
+    CHECK_APPLICATION = "check_application_installed"
+    LIST_APPLICATIONS = "show_installed_applications"
     OPEN_SERVICE = "open_service"
     SEARCH_WEB = "search_web"
     SEARCH_YOUTUBE = "search_youtube"
@@ -168,4 +170,3 @@ class PendingMediaRequest:
     missing_fields: frozenset[str]
     proposed_values: tuple[tuple[str, object], ...]
     created_at: float
-

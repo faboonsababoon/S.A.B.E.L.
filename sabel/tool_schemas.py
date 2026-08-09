@@ -89,6 +89,16 @@ LOCAL_TOOLS: List[Dict[str, Any]] = [
         ["application_name"],
     ),
     _tool(
+        "check_application_installed",
+        "Authoritatively check SABEL's local macOS application catalog for one application. Never guess whether software is installed.",
+        {"application_name": {"type": "string"}},
+        ["application_name"],
+    ),
+    _tool(
+        "show_installed_applications",
+        "Show a bounded, path-free list from SABEL's actual local macOS application catalog.",
+    ),
+    _tool(
         "open_youtube_search",
         "Open a YouTube search for a creator, channel, video, or topic when no exact URL was supplied. Do not use this merely to open the YouTube homepage. Never invent a channel URL.",
         {"query": {"type": "string"}},
@@ -198,10 +208,11 @@ For every tool whose schema has no properties, pass exactly an empty arguments o
 Use request_clarification only when an action cannot run because a required target or argument is missing. Never ask meta-questions such as how the user wants you to respond.
 If a requested action such as playing media is ambiguous and no exact supported action is clear, ask one concrete clarification instead of guessing or refusing generically.
 Use get_trash_status only for Trash contents. Use show_status only for SABEL runtime configuration.
+Use check_application_installed for questions about whether a named application is installed, and show_installed_applications for requests to list installed applications. Never answer installed-software questions from memory.
 Use show_browser_profiles for connected Chrome profiles, stop_browser_task to stop browser control, and show_recent_browser_actions for the local browser audit summary.
 Use open_web_search for raw browser results and delegate_to_openai for current research, comparison, recommendation, or synthesis.
 For browser work, keep profile, provider, query, service, and tab context in separate fields. Profile and provider instructions are never part of a search query. Explicit values in the current user message override prior context. Google means web search unless the user explicitly says Google Chrome. YouTube means YouTube search when a query is present. Never reuse an old query or a previously used profile when the user names a new value.
-Use open_service for registered services with exact Personal/NYU routing. Use browser_copilot_task for a named YouTube channel, search_web for Google/Bing/DuckDuckGo, search_youtube for YouTube results, open_website only for an explicit URL, and open_spotify_search for a confirmed Spotify search.
+Use open_service for registered services with exact Personal/NYU routing. Use browser_copilot_task for a named YouTube channel, search_web for Google/Bing/DuckDuckGo, search_youtube for YouTube results, open_website only for an explicit URL, and open_spotify_search whenever the user asks to open, find, search for, or play named content on Spotify.
 Use show_status for requests about SABEL's health or runtime status, including natural phrasings such as "show your status", "what is your status", "are you working normally", and "show SABEL status". Python generates the values.
 Examples: YouTube homepage -> open_service with service_name "youtube" and profile_id "personal"; Google search in NYU -> search_web with a clean query, search_engine "google", and profile_id "nyu"; YouTube search in Personal -> search_youtube with a clean query and profile_id "personal"; an explicit youtube.com URL -> open_website; emptying Trash -> empty_trash {}; inspecting Trash contents -> get_trash_status {}; a greeting -> normal friendly text; an ambiguous play request -> request_clarification with one concrete question.
 Never invent abilities, tools, shell commands, or hidden results. Do not reveal reasoning."""

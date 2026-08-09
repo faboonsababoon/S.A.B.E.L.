@@ -64,6 +64,27 @@ SCENARIOS = (
         query="Circles",
         profile="nyu",
     ),
+    Scenario(
+        "open circles on spotify",
+        Intent.OPEN_SPOTIFY_SEARCH,
+        service="spotify",
+        query="circles",
+    ),
+    Scenario(
+        "search circles on spotify",
+        Intent.OPEN_SPOTIFY_SEARCH,
+        service="spotify",
+        query="circles",
+    ),
+    Scenario(
+        "is vscode installed",
+        Intent.CHECK_APPLICATION,
+        application="vscode",
+    ),
+    Scenario(
+        "what applications are installed",
+        Intent.LIST_APPLICATIONS,
+    ),
 )
 
 

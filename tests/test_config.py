@@ -1,12 +1,12 @@
 import unittest
 
-from sabel.config import load_settings
+from sabel.config import DEFAULT_OLLAMA_MODEL, load_settings
 
 
 class ConfigTests(unittest.TestCase):
     def test_defaults(self):
         settings = load_settings({})
-        self.assertEqual(settings.ollama_model, "qwen3:1.7b")
+        self.assertEqual(settings.ollama_model, DEFAULT_OLLAMA_MODEL)
         self.assertEqual(settings.cloud_mode, "ask")
         self.assertEqual(settings.openai_model, "gpt-5.6-luna")
         self.assertEqual(settings.history_limit, 10)

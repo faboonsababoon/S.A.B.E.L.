@@ -34,8 +34,11 @@ APPLICATION_ALIASES = {
     "safari": "Safari",
     "spotify": "Spotify",
     "roblox": "Roblox",
+    "roblox studios": "Roblox Studio",
     "settings": "System Settings",
     "system settings": "System Settings",
+    "vs code": "Visual Studio Code",
+    "vscode": "Visual Studio Code",
 }
 ALLOWED_APPLICATION_PATH_ROOTS = (
     PurePosixPath("/Applications"),
@@ -168,6 +171,93 @@ def open_application(
         return ActionResult(False, f"I could not find an application named {name}.")
     return ActionResult(True, f"Opening {name}.")
 
+DELETABLE_APPLICATION_ROOTS = (
+    Path("/Applications"),
+    Path.home() / "Applications",
+)
+
+
+def _find_deletable_application(application_name: str) -> Union[Path, None]:
+    """Find an exact application bundle in a user-deletable application root."""
+    expected_name = f"{application_name}.app".casefold()
+
+    for root in DELETABLE_APPLICATION_ROOTS:
+        try:
+            for candidate in root.iterdir():
+                if candidate.name.casefold() != expected_name:
+                    continue
+
+                # Don't follow a symlink somewhere outside the reviewed root.
+                if candidate.is_symlink():
+                    continue
+
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    resolved_root = root.resolve(strict=True)
+                except OSError:
+                    continue
+
+                if not resolved.is_relative_to(resolved_root):
+                    continue
+
+                if resolved.suffix.casefold() != ".app":
+                    continue
+
+                return resolved
+
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+
+    return None
+
+
+def delete_application(
+    application_name: str, run_command: RunCommand = subprocess.run
+) -> ActionResult:
+    """Move a reviewed macOS application bundle to Trash."""
+
+    try:
+        name = normalize_application_name(application_name)
+    except ValueError as error:
+        return ActionResult(False, str(error))
+
+    app_path = _find_deletable_application(name)
+
+    if app_path is None:
+        return ActionResult(
+            False,
+            f"I could not find a deletable application named {name}.",
+        )
+
+    # Pass the path as argv rather than interpolating it into AppleScript.
+    script = """
+on run argv
+    set targetPath to item 1 of argv
+    tell application "Finder"
+        delete POSIX file targetPath
+    end tell
+end run
+"""
+
+    completed = _run_process(
+        ["osascript", "-e", script, str(app_path)],
+        run_command,
+    )
+
+    if isinstance(completed, ActionResult):
+        return completed
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown macOS error"
+        return ActionResult(
+            False,
+            f"I could not move {name} to Trash: {detail}",
+        )
+
+    return ActionResult(
+        True,
+        f"{name} was moved to Trash.",
+    )
 
 def open_service(
     service_name: str,

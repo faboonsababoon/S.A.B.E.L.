@@ -50,8 +50,13 @@ _PROFILE = re.compile(
     re.I,
 )
 _SAME_PROFILE = re.compile(r"\b(?:the\s+)?same\s+profile\b", re.I)
+_SAME_QUERY = re.compile(
+    r"\b(?:that\s+|the\s+)?(?:same\s+)?(?:string|search|query|thing|one|it)\b",
+    re.I,
+)
 _CONTEXT_REFERENCE = re.compile(
-    r"\b(?:there|in\s+it|on\s+it|same\s+(?:tab|place|profile))\b", re.I
+    r"\b(?:there|in\s+it|on\s+it|same\s+(?:tab|place|profile|thing|search|query))\b",
+    re.I,
 )
 _PROVIDER_AFTER_PREPOSITION = re.compile(
     r"\b(?:on|in|using)\s+(google|youtube|bing|duckduckgo)(?:\.com)?\b",
@@ -155,6 +160,10 @@ def _clean_unquoted_query(tail: str) -> str:
     )
     value = re.sub(r"^\s*(?:up|for)\b", " ", value, flags=re.I)
     value = re.sub(r"^\s*(?:and|then)\b", " ", value, flags=re.I)
+    # A discourse connector can remain after routing phrases are removed from
+    # inputs such as "search the same thing on YouTube but on Personal".
+    if _SAME_QUERY.search(value):
+        value = re.sub(r"\b(?:but|and)\s*$", " ", value, flags=re.I)
     value = re.sub(r"\s+", " ", value).strip(" \t,;:")
     if value[:1] in {'"', "'", "“", "‘"} and value[-1:] not in {'"', "'", "”", "’"}:
         value = value[1:].strip()
@@ -197,7 +206,11 @@ def parse_browser_search_request(
     explicit_profile = (
         next(iter(explicit_profiles)) if len(explicit_profiles) == 1 else None
     )
-    references_context = bool(_CONTEXT_REFERENCE.search(text) or _SAME_PROFILE.search(text))
+    references_context = bool(
+        _CONTEXT_REFERENCE.search(text)
+        or _SAME_PROFILE.search(text)
+        or _SAME_QUERY.search(text)
+    )
     if shorthand is not None:
         shorthand_provider = shorthand.group("provider").casefold()
         provider = "google" if shorthand_provider == "ggoogle" else shorthand_provider
@@ -221,7 +234,8 @@ def parse_browser_search_request(
     quoted = _matching_quote(tail)
     query = quoted if quoted is not None else _clean_unquoted_query(tail)
     if re.fullmatch(
-        r"(?:that\s+)?(?:same\s+)?(?:string|search|query|thing|one|it)(?:\s+up)?",
+        r"(?:that\s+|the\s+)?(?:same\s+)?(?:string|search|query|thing|one|it)"
+        r"(?:\s+up)?(?:\s+(?:again|please))?",
         query,
         re.I,
     ):

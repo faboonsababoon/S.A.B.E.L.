@@ -21,6 +21,8 @@ DEFAULT_APPLICATION_ROOTS = (
 CONFIGURED_APPLICATION_ALIASES = {
     "settings": "system settings",
     "system preferences": "system settings",
+    "vs code": "visual studio code",
+    "vscode": "visual studio code",
 }
 
 
@@ -41,6 +43,7 @@ class InstalledApplication:
     bundle_identifier: Optional[str]
     bundle_name: str
     display_name: str
+    launch_name: str
     aliases: frozenset[str]
 
 
@@ -257,5 +260,9 @@ class ApplicationCatalog:
             bundle_identifier=str(identifier) if isinstance(identifier, str) else None,
             bundle_name=bundle_name,
             display_name=display_name,
+            # ``open -a`` resolves the application bundle's filename most
+            # reliably.  This value comes from the reviewed local catalog,
+            # never from Ollama and never from an arbitrary filesystem path.
+            launch_name=bundle.stem,
             aliases=frozenset(aliases),
         )

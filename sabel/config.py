@@ -10,7 +10,7 @@ from sabel.keychain import read_openai_api_key
 from sabel.media import normalize_music_service
 
 
-DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
+DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_KEEP_ALIVE = "1m"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"

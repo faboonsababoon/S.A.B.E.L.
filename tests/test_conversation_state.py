@@ -109,6 +109,14 @@ class ConversationStateTests(unittest.TestCase):
         self.assertEqual(state.current_browser_reference(now=159.9).profile_id, "nyu")
         self.assertIsNone(state.current_browser_reference(now=160.0))
 
+    def test_application_reference_is_separate_and_expires(self):
+        state = ConversationState(10, browser_reference_ttl=60)
+        state.record_application_reference("Roblox Studio", completed_at=100.0)
+        self.assertEqual(
+            state.current_application_reference(now=159.9), "Roblox Studio"
+        )
+        self.assertIsNone(state.current_application_reference(now=160.0))
+
     def test_cloud_fallback_is_structured_and_expires(self):
         state = ConversationState(10, clarification_ttl=60)
         state.set_pending_cloud_fallback(

@@ -13,6 +13,7 @@ from sabel.local_router import (
     RouterResultType,
 )
 from sabel.ollama_client import LocalToolCall, OllamaResponse
+from sabel.request_models import Intent
 
 
 class LocalRouterTests(unittest.TestCase):
@@ -306,7 +307,9 @@ class LocalRouterTests(unittest.TestCase):
             ],
             1.0,
         )
-        result = LocalRouter(client, ConversationState(10)).route("Open it")
+        result = LocalRouter(client, ConversationState(10)).route(
+            "I need to choose an application"
+        )
         self.assertEqual(result.result_type, RouterResultType.CLARIFICATION)
         self.assertEqual(result.message, "Which application should I open?")
         self.assertEqual(result.expected_slot, "application_name")
@@ -521,6 +524,49 @@ class LocalRouterTests(unittest.TestCase):
             [LocalToolCall("open_spotify_search", {"query": "Circles"})],
         )
         self.assertNotIn("on Spotify", result.tool_calls[0].arguments["query"])
+
+    def test_spotify_open_and_search_wording_override_model_misroutes(self):
+        for text in (
+            "open circles on spotify",
+            "open the song circles on spotify",
+            "search circles on spotify",
+        ):
+            with self.subTest(text=text):
+                client = Mock()
+                client.chat.return_value = OllamaResponse(
+                    "",
+                    [LocalToolCall("open_application", {"application_name": "wrong"})],
+                    1.0,
+                )
+                result = LocalRouter(client, ConversationState(10)).route(text)
+                self.assertEqual(
+                    result.tool_calls,
+                    [LocalToolCall("open_spotify_search", {"query": "circles"})],
+                )
+                self.assertEqual(result.resolved_request.intent, Intent.OPEN_SPOTIFY_SEARCH)
+
+    def test_installed_application_questions_never_use_model_memory(self):
+        client = Mock()
+        client.chat.return_value = OllamaResponse(
+            "Visual Studio Code is installed.", [], 1.0
+        )
+        checked = LocalRouter(client, ConversationState(10)).route(
+            "is vscode installed"
+        )
+        self.assertEqual(
+            checked.tool_calls,
+            [LocalToolCall("check_application_installed", {"application_name": "vscode"})],
+        )
+        self.assertEqual(checked.resolved_request.intent, Intent.CHECK_APPLICATION)
+
+        listed = LocalRouter(client, ConversationState(10)).route(
+            "what applications are installed"
+        )
+        self.assertEqual(
+            listed.tool_calls,
+            [LocalToolCall("show_installed_applications", {})],
+        )
+        self.assertEqual(listed.resolved_request.intent, Intent.LIST_APPLICATIONS)
 
     def test_saved_media_default_avoids_redundant_question(self):
         client = Mock()

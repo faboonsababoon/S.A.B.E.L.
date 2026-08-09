@@ -692,7 +692,9 @@ The script is constant source code, never model-generated. SABEL never uses
 - `open_application` accepts only `application_name`; path/command fields are
   rejected. Canonical `.app` paths beneath reviewed macOS application roots may
   be reduced to their final name, but no supplied path is ever executed.
-- Applications run only as `open -a <name>` with an argument list and no shell.
+- Applications run only as `open -a <catalog launch name>` with an argument
+  list and no shell. The launch name is the catalog-owned `.app` basename, not
+  a path or model-supplied command.
 - Common services resolve through a reviewed YouTube/Google/GitHub registry;
   explicit URLs remain a separate HTTP/HTTPS-only operation.
 - Spotify search uses a fixed, URL-encoded implementation and reports opening
@@ -757,6 +759,13 @@ fall back to regular `Roblox`, because the meaningful `studio` token is absent.
 Ambiguous or missing applications produce a clarification/not-found message and
 no process is launched. Ollama never receives or chooses bundle paths.
 
+Installed-software questions are also catalog-backed. `is VS Code installed?`
+uses a typed read-only lookup, while `show installed applications` returns a
+bounded path-free inventory. The model is not allowed to guess. A successful
+lookup or application action also stores a short-lived local application
+reference, so `open it please` can resolve without turning `it please` into a
+new application name.
+
 Corrections mark the prior attempt as rejected without reusing it. SABEL stores
 the most recent attempted action separately from the most recent verified
 successful action. `do the same` clones only the latter structured template;
@@ -766,7 +775,12 @@ unverified, or user-rejected actions never become reusable context.
 
 Media clarification is also structured. `play circles` retains `query=circles`;
 a reply such as `YouTube, on my NYU profile` fills the missing service and profile
-and becomes a NYU YouTube search. Browser state remains isolated per exact
+and becomes a NYU YouTube search. Explicit Spotify wording such as `open the song
+circles on Spotify` or `search circles on Spotify` resolves to the same reviewed
+Spotify-results action and never becomes an application name or Google query.
+Context wording such as `search the same thing on YouTube but on Personal`
+retains the last verified query while applying the current provider and profile.
+Browser state remains isolated per exact
 `personal`/`nyu` WebSocket connection. Every result must match the request ID,
 profile, destination provider, query, and tab before SABEL updates context or
 reports success.

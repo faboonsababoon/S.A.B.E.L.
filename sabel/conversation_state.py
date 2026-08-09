@@ -74,6 +74,8 @@ class ConversationState:
     reusable_action: Optional[ReusableActionTemplate] = None
     last_browser_reference: Optional[LastBrowserReference] = None
     last_browser_query: Optional[str] = None
+    last_application_reference: Optional[str] = None
+    last_application_reference_at: float = 0.0
     research_answer: Optional[str] = None
     research_sources: List[str] = field(default_factory=list)
     last_unverified_local_fallback_task: Optional[str] = None
@@ -247,7 +249,14 @@ class ConversationState:
         self.last_attempted_action = record
         if accepted_success:
             self.last_successful_action = record
-            self.reusable_action = ReusableActionTemplate.from_request(request)
+            if request.intent in {
+                Intent.OPEN_APPLICATION,
+                Intent.OPEN_SERVICE,
+                Intent.SEARCH_WEB,
+                Intent.SEARCH_YOUTUBE,
+                Intent.OPEN_SPOTIFY_SEARCH,
+            }:
+                self.reusable_action = ReusableActionTemplate.from_request(request)
 
     def contextual_failure_message(self) -> str:
         record = self.last_attempted_action
@@ -271,6 +280,10 @@ class ConversationState:
                 action += f" in your {profile} profile"
         elif request.intent == Intent.OPEN_APPLICATION:
             action = f"opening the {request.application_name or 'requested'} application"
+        elif request.intent == Intent.CHECK_APPLICATION:
+            action = f"checking whether {request.application_name or 'the application'} is installed"
+        elif request.intent == Intent.LIST_APPLICATIONS:
+            action = "listing the installed applications"
         else:
             action = "the previous action"
         if record.result == ActionResultStatus.VERIFIED:
@@ -362,6 +375,30 @@ class ConversationState:
         )
         if context.query is not None:
             self.last_browser_query = context.query
+
+    def record_application_reference(
+        self, application_name: str, *, completed_at: Optional[float] = None
+    ) -> None:
+        """Remember one catalog-validated application name for local pronouns."""
+        cleaned = " ".join(application_name.split()).strip()
+        if not cleaned:
+            return
+        self.last_application_reference = cleaned
+        self.last_application_reference_at = (
+            time.monotonic() if completed_at is None else completed_at
+        )
+
+    def current_application_reference(
+        self, now: Optional[float] = None
+    ) -> Optional[str]:
+        if self.last_application_reference is None:
+            return None
+        current = time.monotonic() if now is None else now
+        if current - self.last_application_reference_at >= self.browser_reference_ttl:
+            self.last_application_reference = None
+            self.last_application_reference_at = 0.0
+            return None
+        return self.last_application_reference
 
     def current_browser_reference(
         self, now: Optional[float] = None

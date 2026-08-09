@@ -41,9 +41,15 @@ class ToolDispatcherTests(unittest.TestCase):
         command_field = self.dispatcher.dispatch(
             "open_application", {"application_name": "Safari", "command": "whoami"}, "open it"
         )
+        check_path = self.dispatcher.dispatch(
+            "check_application_installed",
+            {"application_name": "/tmp/Evil.app"},
+            "is it installed",
+        )
         self.assertIn("paths are not accepted", arbitrary.message)
         self.assertIn("rejected", path_field.message)
         self.assertIn("rejected", command_field.message)
+        self.assertIn("paths are not accepted", check_path.message)
         self.handlers["open_application"].assert_not_called()
 
     def test_allowlisted_application_path_is_normalized_before_handler(self):

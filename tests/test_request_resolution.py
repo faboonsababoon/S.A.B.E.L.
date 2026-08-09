@@ -99,6 +99,70 @@ class RequestResolutionTests(unittest.TestCase):
         self.assertEqual(opened, ["Codex"])
         self.assertEqual(result.message, "Opening Codex.")
 
+    def test_dispatcher_uses_catalog_launch_name_not_display_name(self):
+        opened = []
+
+        def dry_open(name):
+            opened.append(name)
+            return ActionResult(True, "dry run")
+
+        dispatcher = ToolDispatcher(
+            Settings(),
+            self.state,
+            lambda: True,
+            handlers={"open_application": dry_open},
+            application_catalog=self.catalog,
+        )
+        result = dispatcher.dispatch(
+            "open_application",
+            {"application_name": "Roblox Studio"},
+            "open roblox studios",
+        )
+        self.assertTrue(result.action_success)
+        self.assertEqual(opened, ["RobloxStudio"])
+        self.assertEqual(result.message, "Opening Roblox Studio.")
+
+    def test_installed_application_questions_use_catalog_tools(self):
+        checked = self.resolve("is Codex installed")
+        listed = self.resolve("what applications are installed")
+        self.assertEqual(checked.request.intent, Intent.CHECK_APPLICATION)
+        self.assertEqual(
+            (checked.tool_name, checked.arguments),
+            ("check_application_installed", {"application_name": "Codex"}),
+        )
+        self.assertEqual(listed.request.intent, Intent.LIST_APPLICATIONS)
+        self.assertEqual((listed.tool_name, listed.arguments), ("show_installed_applications", {}))
+
+        dispatcher = ToolDispatcher(
+            Settings(),
+            self.state,
+            lambda: True,
+            handlers={"open_application": lambda name: ActionResult(True, name)},
+            application_catalog=self.catalog,
+        )
+        installed = dispatcher.dispatch(
+            "check_application_installed",
+            {"application_name": "Codex"},
+            "is Codex installed",
+        )
+        inventory = dispatcher.dispatch(
+            "show_installed_applications", {}, "what applications are installed"
+        )
+        self.assertEqual(installed.message, "Yes—Codex is installed.")
+        self.assertIn("Installed applications (3)", inventory.message)
+        self.assertNotIn(str(Path(self.temporary.name)), inventory.message)
+
+    def test_application_pronoun_uses_bounded_local_reference(self):
+        missing = self.resolve("open it please")
+        self.assertIsNone(missing.request)
+        self.assertIn("name the application", missing.message)
+        self.state.record_application_reference("Codex")
+        current = self.state.current_application_reference()
+        self.assertEqual(current, "Codex")
+        referenced = self.resolve("open it please")
+        self.assertEqual(referenced.request.intent, Intent.OPEN_APPLICATION)
+        self.assertEqual(referenced.request.application_name, "Codex")
+
     def test_search_paraphrases_resolve_identically(self):
         phrases = (
             "search cats on Google in my NYU profile",
@@ -129,6 +193,27 @@ class RequestResolutionTests(unittest.TestCase):
         self.assertEqual(request.intent, Intent.SEARCH_YOUTUBE)
         self.assertEqual(request.query, "Circles")
         self.assertEqual(request.profile_id, "nyu")
+
+    def test_spotify_content_phrasings_are_media_searches(self):
+        for text in (
+            "open circles on spotify",
+            "open the song circles on spotify",
+            "search circles on spotify",
+            "play circles on spotify",
+        ):
+            with self.subTest(text=text):
+                decision = self.resolve(text)
+                self.assertEqual(decision.request.intent, Intent.OPEN_SPOTIFY_SEARCH)
+                self.assertEqual(decision.arguments, {"query": "circles"})
+
+    def test_same_thing_with_provider_and_profile_override_keeps_last_query(self):
+        self.state.record_browser_context("google", "personal", "green water bottles")
+        request = self.resolve(
+            "now search the same thing on youtube but on personal profile"
+        ).request
+        self.assertEqual(request.intent, Intent.SEARCH_YOUTUBE)
+        self.assertEqual(request.query, "green water bottles")
+        self.assertEqual(request.profile_id, "personal")
 
     def test_do_same_clones_only_verified_action(self):
         original = ResolvedRequest(

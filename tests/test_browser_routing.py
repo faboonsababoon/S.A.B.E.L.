@@ -120,6 +120,17 @@ class BrowserSearchRoutingTests(unittest.TestCase):
         self.assertEqual(parsed.query, "how to bake cookies")
         self.assertEqual(parsed.search_engine, "google")
 
+    def test_same_thing_ignores_discourse_connector_and_routing_residue(self):
+        parsed = parse_browser_search_request(
+            "now search the same thing on youtube but on personal profile",
+            reference=self.reference(profile="nyu", provider="google"),
+            last_query="green water bottles",
+        )
+        self.assertEqual(
+            (parsed.query, parsed.search_engine, parsed.profile_id),
+            ("green water bottles", "youtube", "personal"),
+        )
+
     def test_literal_spelling_is_never_corrected(self):
         for query in ("matie stone", "Matt Rober"):
             parsed = parse_browser_search_request(

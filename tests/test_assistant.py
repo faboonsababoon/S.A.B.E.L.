@@ -211,7 +211,7 @@ class AssistantIntegrationTests(unittest.TestCase):
         self.assertEqual(
             result.message,
             "SABEL status\n"
-            "Local model: qwen3:1.7b\n"
+            f"Local model: {self.settings.ollama_model}\n"
             "Ollama: Available\n"
             "Cloud mode: Ask\n"
             "OpenAI configured: Yes\n"

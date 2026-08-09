@@ -66,7 +66,8 @@ def main() -> int:
         assert result.validated_arguments == {
             "application_name": found["Roblox Studio"].display_name
         }
-        assert opened == [found["Roblox Studio"].bundle_name]
+        assert opened == [found["Roblox Studio"].launch_name]
+        assert found["Roblox Studio"].launch_name == found["Roblox Studio"].bundle_path.stem
     print(f"Scanned {len(applications)} application bundles; no applications were opened.")
     print("APPLICATION_CATALOG_INTEGRATION=PASS")
     return 0

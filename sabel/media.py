@@ -7,6 +7,20 @@ from typing import Optional
 
 MEDIA_SERVICES = {"spotify", "youtube"}
 
+_DIRECT_PLAY = re.compile(
+    r"^\s*(?:please\s+)?(?:play|listen\s+to)(?:\s+(.*?))?\s*[.!?]*\s*$",
+    re.I,
+)
+_EXPLICIT_SERVICE_MEDIA = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:open|find|search(?:\s+(?:for|up))?|play|listen\s+to)\s+"
+    r"(?:(?:the\s+)?(?:song|track|album|artist|playlist|music)\s+)?"
+    r"(?P<query>.+?)\s+(?:on|in)\s+(?P<service>spotify|youtube)"
+    r"(?:\s+(?:on|in|using|with)\s+(?:my\s+)?(?:personal|nyu|school)"
+    r"(?:\s+(?:chrome\s+)?(?:profile|browser|account))?)?\s*[.!?]*\s*$",
+    re.I,
+)
+
 
 @dataclass(frozen=True)
 class MediaRequest:
@@ -15,8 +29,13 @@ class MediaRequest:
 
 
 def parse_media_request(text: str) -> Optional[MediaRequest]:
-    """Parse a direct play request and remove a trailing service phrase."""
-    match = re.match(r"^\s*(?:please\s+)?play(?:\s+(.*?))?\s*[.!?]*\s*$", text, re.I)
+    """Parse media wording while keeping the content and service separate."""
+    explicit = _EXPLICIT_SERVICE_MEDIA.match(text)
+    if explicit:
+        query = " ".join(explicit.group("query").split()).strip(" .!?")
+        return MediaRequest(query or None, explicit.group("service").casefold())
+
+    match = _DIRECT_PLAY.match(text)
     if not match:
         return None
     remainder = " ".join((match.group(1) or "").split()).strip(" .!?")
