@@ -100,7 +100,7 @@
       }
       const security = root.SabelSecurity || (typeof require !== "undefined" ? require("./security.js") : null);
       if (!security?.siteAccessAllowed(normalized)) {
-        throw new ProtocolError("Banking, medical, payment, and password-manager sites are outside Browser Copilot v1 scope.", "RESTRICTED_SITE");
+        throw new ProtocolError("Banking, medical, payment, and password-manager sites are outside Browser Copilot scope.", "RESTRICTED_SITE");
       }
       return normalized;
     }))];

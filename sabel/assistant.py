@@ -126,8 +126,17 @@ class SabelAssistant:
             )
 
         prefixes = []
-        if self.state.clear_expired_pending_destructive_action() is not None:
-            prefixes.append("The pending Trash action expired and was cancelled.")
+        expired_action = self.state.clear_expired_pending_destructive_action()
+        if expired_action is not None:
+            if expired_action.tool_name == "confirm_browser_task":
+                self.dispatcher.cancel_expired_browser_confirmation(
+                    expired_action.arguments.get("task_id")
+                )
+                prefixes.append(
+                    "The pending browser action expired and was cancelled."
+                )
+            else:
+                prefixes.append("The pending Trash action expired and was cancelled.")
         if self.state.clear_expired_clarification() is not None:
             prefixes.append("The previous clarification expired.")
         if self.state.clear_expired_media_request() is not None:
@@ -497,6 +506,33 @@ class SabelAssistant:
             "search_youtube": ("query", "profile_id"),
         }
         required = argument_keys.get(intent)
+        if intent == "browser_copilot_task":
+            objective = slots.get("objective")
+            profile = slots.get("profile") or slots.get("profile_id")
+            service = slots.get("service")
+            initial_url = slots.get("initial_url")
+            if (
+                isinstance(objective, str)
+                and objective.strip()
+                and profile in {"personal", "nyu"}
+                and bool(isinstance(service, str) and service.strip())
+                != bool(isinstance(initial_url, str) and initial_url.strip())
+            ):
+                arguments: dict[str, object] = {
+                    "objective": objective.strip(),
+                    "profile": profile,
+                }
+                if isinstance(service, str) and service.strip():
+                    arguments["service"] = service.strip()
+                if isinstance(initial_url, str) and initial_url.strip():
+                    arguments["initial_url"] = initial_url.strip()
+                self.state.clear_pending_clarification()
+                dispatched = self.dispatcher.dispatch(
+                    intent, arguments, user_text, approval_callback
+                )
+                return self._render_dispatch(
+                    user_text, dispatched, duration_ms, prefixes
+                )
         if intent == "browser_search":
             service = slots.get("search_engine") or slots.get("service")
             query = slots.get("query")

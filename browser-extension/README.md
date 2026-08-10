@@ -17,7 +17,7 @@ cannot take over Personal. Commands whose `profile_id` does not exactly match th
 receiving extension are returned as `PROFILE_MISMATCH` and are not executed.
 
 Banking, medical, payment, and password-manager domains are intentionally outside
-Browser Copilot v1 scope and are rejected by settings validation. File URLs and
+Browser Copilot scope and are rejected by settings validation. File URLs and
 other non-HTTP(S) schemes are never requested.
 
 The content script returns bounded snapshots and uses short-lived element IDs. It

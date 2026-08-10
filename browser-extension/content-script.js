@@ -5,6 +5,7 @@
   const MAX_ELEMENTS = 120;
   const MAX_SUMMARY = 6000;
   const MAX_ELEMENT_TEXT = 240;
+  const MAX_SELECT_OPTIONS = 30;
   const SNAPSHOT_TTL_MS = 30000;
   const INTERACTIVE_SELECTOR = [
     "a[href]", "button", "input", "textarea", "select",
@@ -50,6 +51,14 @@
         if (type === "hidden" || Security.isSensitiveField(element)) continue;
         const elementId = `element-${this.idFactory()}`;
         const rect = element.getBoundingClientRect();
+        const optionValues = String(element.tagName || "").toLowerCase() === "select"
+          ? Array.from(element.options || []).slice(0, MAX_SELECT_OPTIONS).map((option) => ({
+              value: Security.sanitizeText(option.value || "", 200),
+              label: Security.sanitizeText(option.textContent || option.label || "", MAX_ELEMENT_TEXT),
+              selected: Boolean(option.selected),
+              disabled: Boolean(option.disabled)
+            }))
+          : [];
         elements.set(elementId, element);
         interactive.push({
           element_id: elementId,
@@ -66,6 +75,7 @@
           disabled: false,
           checked: Boolean(element.checked),
           selected: Boolean(element.selected),
+          options: optionValues,
           bounding: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
         });
       }
@@ -142,7 +152,7 @@
     }
   }
 
-  const api = { SnapshotController, MAX_ELEMENTS, MAX_SUMMARY, MAX_ELEMENT_TEXT, SNAPSHOT_TTL_MS, INTERACTIVE_SELECTOR };
+  const api = { SnapshotController, MAX_ELEMENTS, MAX_SUMMARY, MAX_ELEMENT_TEXT, MAX_SELECT_OPTIONS, SNAPSHOT_TTL_MS, INTERACTIVE_SELECTOR };
   root.SabelContent = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 

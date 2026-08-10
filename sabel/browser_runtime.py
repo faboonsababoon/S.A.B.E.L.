@@ -8,10 +8,12 @@ from typing import Coroutine, Optional
 
 from sabel.browser_copilot import BrowserCopilot, BrowserOutcome
 from sabel.browser_models import BrowserActionState
+from sabel.browser_planner import OllamaBrowserPlanner
 from sabel.browser_security import BrowserTokenStore, ExtensionOriginStore
 from sabel.browser_tasks import BrowserAuditLog, BrowserTaskManager
 from sabel.browser_transport import BrowserTransport, WebSocketBrowserTransport
 from sabel.config import Settings
+from sabel.ollama_client import OllamaClient
 
 
 class BrowserBridgeRuntime:
@@ -39,6 +41,7 @@ class BrowserBridgeRuntime:
             audit_log=self.audit_log,
             albert_url=settings.albert_url,
             default_gmail_profile=settings.default_gmail_profile,
+            planner=OllamaBrowserPlanner(OllamaClient(settings)),
         )
         self.operation_timeout = operation_timeout
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -141,36 +144,43 @@ class BrowserBridgeRuntime:
         return self._run(self.copilot.search_youtube(query, profile_id))
 
     def browser_copilot_task(
-        self, objective: str, service: str, profile: str, approval_callback=None
+        self,
+        objective: str,
+        service: Optional[str],
+        profile: str,
+        approval_callback=None,
+        initial_url: Optional[str] = None,
     ) -> BrowserOutcome:
         if not self.started:
             return self._unavailable()
-        if service.casefold() != "youtube":
-            return BrowserOutcome(
-                BrowserActionState.FAILED,
-                "Browser Copilot v1 currently supports verified channel navigation on YouTube.",
-                False,
-            )
-        if profile.casefold() != "personal":
-            return BrowserOutcome(
-                BrowserActionState.FAILED,
-                "YouTube channel tasks use the Personal browser profile in Browser Copilot v1.",
-                False,
-            )
+        selected_service = service.strip().casefold() if isinstance(service, str) and service.strip() else None
         target = _youtube_channel_target(objective)
-        if not target:
-            return BrowserOutcome(
-                BrowserActionState.FAILED,
-                "Please name the YouTube channel you want to open.",
-                False,
+        if target and selected_service == "youtube" and profile.casefold() == "personal" and initial_url is None:
+            return self._run(
+                self.copilot.open_youtube_channel(
+                    target,
+                    objective,
+                    approval_callback=approval_callback,
+                )
             )
         return self._run(
-            self.copilot.open_youtube_channel(
-                target,
+            self.copilot.run_browser_task(
                 objective,
-                approval_callback=approval_callback,
+                profile,
+                service_name=selected_service,
+                initial_url=initial_url,
             )
         )
+
+    def resume_browser_task(self, task_id: str) -> BrowserOutcome:
+        if not self.started:
+            return self._unavailable()
+        return self._run(self.copilot.resume_browser_task(task_id))
+
+    def cancel_pending_browser_task(self, task_id: str) -> BrowserOutcome:
+        if not self.started:
+            return self._unavailable()
+        return self.copilot.cancel_pending_browser_task(task_id)
 
     def stop_browser_task(self) -> BrowserOutcome:
         if not self.started:

@@ -1,12 +1,14 @@
-# SABEL — Local macOS Assistant with Browser Copilot v1
+# SABEL — Local macOS Assistant with a Constrained Browser Agent
 
 SABEL is a typed macOS assistant. A local Ollama language model interprets every
 normal request and selects from a small, explicit tool allowlist. Ordinary Mac
 actions stay local. Difficult, current, multi-source research may be delegated to
-OpenAI only after Python applies the configured cloud policy. Browser Copilot v1
+OpenAI only after Python applies the configured cloud policy. Browser Copilot
 adds an authenticated, localhost-only Chrome extension bridge for profile-aware
 navigation, constrained page observation, controlled interaction, and
-objective-specific verification.
+objective-specific verification. Multi-step browser goals use a bounded local
+observe–plan–validate–act loop; simple opens and searches remain deterministic
+one-step tools.
 
 Voice, wake words, a GUI, remote access, sleep control, and background listening
 are intentionally postponed.
@@ -112,6 +114,8 @@ Take me to github.com.
 Launch Visual Studio Code.
 Go to SSundee's YouTube channel.
 Find the latest MrBeast video on YouTube.
+Open GitHub in Personal and find the S.A.B.E.L. repository.
+Go to https://docs.python.org/3/library/subprocess.html and find subprocess.run.
 Search Google for the NYU academic calendar.
 Is my Trash empty?
 What can you do?
@@ -276,7 +280,7 @@ Install/start Ollama using its normal macOS application or CLI setup, then pull
 the default local model once:
 
 ```bash
-ollama pull qwen3:1.7b
+ollama pull qwen3.5:4b
 ```
 
 Verify it:
@@ -285,7 +289,7 @@ Verify it:
 ollama list
 ```
 
-This repository was verified with Ollama CLI 0.32.5 and `qwen3:1.7b` installed.
+This repository targets the configured `qwen3.5:4b` local Ollama model.
 The `ollama pull` step is still required once on any new Mac that does not already
 have that model.
 
@@ -315,7 +319,7 @@ variables and does not automatically load `.env` files.
 Local settings:
 
 ```bash
-export OLLAMA_MODEL="qwen3:1.7b"
+export OLLAMA_MODEL="qwen3.5:4b"
 export OLLAMA_BASE_URL="http://localhost:11434"
 export OLLAMA_KEEP_ALIVE="1m"
 export SABEL_HISTORY_LIMIT="10"
@@ -325,7 +329,7 @@ export SABEL_BROWSER_REFERENCE_TTL="300"
 export SABEL_DEFAULT_MUSIC_SERVICE="spotify"
 export SABEL_DEFAULT_SEARCH_ENGINE="google"
 export SABEL_BROWSER_BRIDGE_PORT="8765"
-export SABEL_BROWSER_MAX_ACTIONS="8"
+export SABEL_BROWSER_MAX_ACTIONS="15"
 export SABEL_CONFIG_DIR="$HOME/.sabel"
 export SABEL_ALBERT_URL="https://YOUR_REVIEWED_ALBERT_HOST/"
 export SABEL_DEFAULT_GMAIL_PROFILE="personal"
@@ -361,7 +365,7 @@ Never place a real API key in source, `.env.example`, screenshots, chats, tests,
 or logs. `.env` and `.venv/` are ignored by Git. If a key is accidentally shared,
 revoke it and store a new one with `--store-openai-key`.
 
-## Browser Copilot v1
+## Browser Copilot
 
 ### Architecture and trust boundary
 
@@ -373,11 +377,14 @@ it, or verify the resulting state. Browser Copilot separates those jobs:
 typed request
   → Ollama selects one high-level browser tool
   → Python creates objective + profile + domain + action scope
-  → Python proposes and validates one step
+  → extension returns one bounded current-page snapshot
+  → local Ollama planner proposes exactly one structured decision
+  → Python parses and validates that one decision
   → authenticated ws://127.0.0.1 bridge
   → Manifest V3 service worker checks profile, permission, URL, and schema
-  → content script returns a constrained snapshot or performs one ID-based action
-  → Python observes URL/title/fresh snapshot and verifies the objective
+  → content script performs one reviewed ID-based action
+  → Python obtains a new snapshot and evaluates progress
+  → repeat until verified completion, clarification, confirmation, failure, or limit
   → central renderer emits only the final friendly response
 ```
 
@@ -470,7 +477,8 @@ Personal; YouTube defaults to Personal. `Open Gmail` asks which account unless a
 default was explicitly saved. A disconnected required profile is reported; SABEL
 never silently substitutes another account.
 
-`SABEL_BROWSER_MAX_ACTIONS` configures the initial autonomous-action limit. A
+`SABEL_BROWSER_MAX_ACTIONS` configures the hard autonomous-action limit (15 by
+default). A
 later direct user approval may extend an active task by five actions; webpage
 content cannot change either limit.
 
@@ -488,7 +496,8 @@ browser reference.
 A content script observes only the active, allowed HTTP/HTTPS page after Chrome
 has granted host permission. It returns title, URL, bounded visible-text summary,
 and at most 120 visible interactive elements. Each element contains reviewed
-metadata and an opaque ID tied to a 30-second snapshot. Hidden inputs, password
+metadata, bounded select-option values, and an opaque ID tied to a 30-second
+snapshot. Hidden inputs, password
 values, scripts, styles, cookies, page storage, arbitrary DOM selectors, and raw
 HTML are excluded. Text and element counts are capped.
 
@@ -498,14 +507,30 @@ Password, hidden, file-upload, payment, MFA, and similar sensitive fields are
 blocked. Ordinary text is capped. Navigation accepts validated HTTP/HTTPS URLs
 inside the task's authorized domains and the extension's user-granted site list.
 
-The planner takes one step at a time:
+The planner can return only `click`, `type`, `select`, `scroll`, `press_key`,
+`navigate`, `back`, `open_tab`, `done`, `clarify`, or
+`request_confirmation`. It cannot return JavaScript, CSS selectors, shell
+commands, extension calls, or a precomputed sequence of element IDs. The planner
+takes one step at a time:
 
 ```text
 create task → observe → propose one action → validate → execute
             → observe fresh state → verify progress → repeat or stop
 ```
 
-For `Go to Taz Skylar's YouTube channel`, SABEL uses Personal, opens a YouTube
+Every element action is bound to the current snapshot. A navigation or click
+invalidates any old plan, so the next decision is made only after a new bounded
+snapshot. Effectively unchanged snapshots plus repeated identical actions trigger
+the no-progress guard. Reaching the configured action limit ends truthfully with
+no success claim.
+
+A `done` decision is not sufficient by itself. It must include a concise answer
+and bounded literal evidence that Python can find in the current URL, title, or
+visible-text snapshot. Unsupported or malformed planner output fails closed.
+
+The specialized verified YouTube-channel workflow remains in place for its exact
+high-reliability command shape. For `Go to Taz Skylar's YouTube channel`, SABEL
+uses Personal, opens a YouTube
 search, reads the constrained result snapshot, selects one matching channel link,
 clicks it, obtains the active URL and a fresh snapshot, and checks that the domain
 is YouTube, the URL has a channel shape, and the page evidence contains the
@@ -529,21 +554,22 @@ Automatic actions are narrow, reversible steps directly implied by the user's
 request: list connected profiles/tabs, open a reviewed service or search in the
 correct profile, read a constrained snapshot, click the task-relevant same-scope
 result, scroll, or follow expected same-domain navigation. The default autonomous
-limit is eight actions. It stops and asks before any additional five-action
-extension; only a later direct user instruction can expand a task's domains,
-actions, or profiles.
+limit is 15 actions. Only a later direct user instruction can expand a task's
+domains, actions, or profiles.
 
 Fresh confirmation is required for a webpage-introduced obligation—creating an
 account, signing in again, installing software/extensions, granting permission,
 uploading, requesting access, subscribing, completing a CAPTCHA, or entering
 payment information—and for consequential actions such as submit, send,
 purchase, enroll, delete, download, disclose personal information, or save an
-external change. The prompt identifies the step and profile. Declining performs
-nothing. Password and file-upload typing remain blocked even with ordinary model
-output. A webpage cannot imitate this permission; approval must come from the
-terminal user callback.
+external change. The prompt identifies the step and profile. The exact validated
+proposal and current snapshot remain in Python-owned pending state; a later clear
+confirmation resumes only that stored action through the assistant's central
+confirmation router. Declining, replacement, or expiration performs nothing.
+Password and file-upload typing remain blocked even after confirmation. A
+webpage cannot imitate permission.
 
-Browser Copilot v1 also refuses to add banking, medical, payment, or
+Browser Copilot also refuses to add banking, medical, payment, or
 password-manager domains to the extension allowlist. File URLs and non-HTTP(S)
 schemes are never eligible for host permission or navigation.
 
@@ -579,14 +605,28 @@ domain, action, result, confirmation status, and policy decision. It excludes th
 bridge token, typed text, page body, passwords, cookies, MFA codes, and other
 secrets.
 
-Browser Copilot v1 supports two named Chrome connections, reviewed service/search
-opening, read-only tab summaries, and verified YouTube channel navigation. It
-does not log in, bypass CAPTCHAs, read passwords, inspect cookies, send email,
-purchase, upload files, perform arbitrary JavaScript, accept arbitrary selectors,
-control restricted `chrome://` pages, guarantee an "official" channel beyond
-visible evidence, or verify Spotify playback. Chrome may suspend the Manifest V3
-service worker; reconnect is automatic with bounded backoff. The bridge is local
-only. There is no voice input, GUI assistant, wake word, sleep control, public
+Browser Copilot supports two named Chrome connections, deterministic reviewed
+service/search opening, read-only tab summaries, the specialized verified
+YouTube-channel workflow, and general same-scope multi-step tasks driven by the
+configured local Ollama model. Every task stays in one exact profile and one
+Python-authorized domain set. An unregistered named website requires its explicit
+HTTP/HTTPS URL, and each domain must also be added to that extension profile's
+Allowed sites and approved in Chrome. A broad Google discovery task cannot
+silently expand into arbitrary result domains; provide the destination URL when
+the task must navigate that site.
+
+It does not enter passwords or MFA/payment fields, log in on the user's behalf,
+bypass CAPTCHAs, inspect cookies/storage, upload files, perform arbitrary
+JavaScript, accept arbitrary selectors, control restricted `chrome://` pages,
+or claim anything not supported by current visible evidence. Sending, posting,
+purchasing, deleting, changing settings/enrollment, downloads, and consequential
+form submissions always pause for confirmation; some capabilities remain blocked
+entirely. Dynamic pages may change before an approved action and correctly cause
+a stale-snapshot failure. The local model can still misunderstand a page, so
+strict parsing, policy checks, step limits, no-progress detection, and evidence
+verification remain mandatory. Chrome may suspend the Manifest V3 service
+worker; reconnect is automatic with bounded backoff. The bridge is local only.
+There is no voice input, GUI assistant, wake word, sleep control, public
 deployment, or Native Messaging host in this release.
 
 The complete hands-on two-profile procedure is in
@@ -798,7 +838,7 @@ The runner uses the project virtual environment when present and reports each
 layer separately:
 
 1. Focused unit and property/invariant tests.
-2. Production-router conformance against the real `qwen3:1.7b` Ollama model at
+2. Production-router conformance against the configured local Ollama model at
    temperature zero, repeated three times per critical scenario.
 3. A black-box subprocess test using real stdin/stdout and `main.py`.
 4. Two simultaneous authenticated WebSocket extension simulators, with separate

@@ -10,6 +10,7 @@ from sabel.application_catalog import ApplicationCatalog
 from sabel.browser_protocol import ACTION_FIELDS
 from sabel.browser_routing import (
     WEB_SEARCH_ENGINES,
+    parse_general_browser_task,
     parse_browser_search_request as parse_structured_browser_search,
     validate_search_query,
 )
@@ -182,7 +183,7 @@ class LocalRouter:
 
 
 class PendingActionRouter:
-    """Interpret one reply with destructive-action context before normal routing."""
+    """Interpret one reply with Python-owned consequential-action context."""
 
     def __init__(self, client: OllamaClient, state: ConversationState) -> None:
         self.client = client
@@ -193,7 +194,7 @@ class PendingActionRouter:
         if pending is None:
             return RouterResult(
                 RouterResultType.ERROR,
-                message="There is no pending destructive action.",
+                message="There is no pending consequential action.",
             )
         messages = [{"role": "system", "content": PENDING_SYSTEM_PROMPT}]
         messages.extend(self.state.messages())
@@ -215,7 +216,7 @@ class PendingActionRouter:
         if deterministic_intent == UNCERTAIN_PENDING_RESPONSE:
             return RouterResult(
                 RouterResultType.RESPONSE,
-                message=TRASH_WARNING,
+                message=pending.warning or TRASH_WARNING,
                 duration_ms=response.duration_ms,
             )
         if deterministic_intent is not None:
@@ -465,6 +466,8 @@ def _normal_tools_for(
         names = {"show_recent_browser_actions"}
     elif _youtube_channel_target(user_text):
         names = {"browser_copilot_task", "request_clarification"}
+    elif parse_general_browser_task(user_text) is not None:
+        names = {"browser_copilot_task", "request_clarification"}
     elif _parse_browser_search_request(
         user_text, state, default_search_engine
     ) is not None:
@@ -572,13 +575,6 @@ def _safe_domain_fallback(
         return _zero_argument_result("stop_browser_task", result.duration_ms)
     if _looks_like_browser_audit(lowered):
         return _zero_argument_result("show_recent_browser_actions", result.duration_ms)
-    explicit_url = _extract_explicit_url(user_text)
-    if explicit_url and _looks_like_navigation_request(lowered):
-        return RouterResult(
-            RouterResultType.TOOL_CALLS,
-            tool_calls=[LocalToolCall("open_website", {"url": explicit_url})],
-            duration_ms=result.duration_ms,
-        )
     channel_target = _youtube_channel_target(user_text)
     if channel_target:
         return RouterResult(
@@ -593,6 +589,47 @@ def _safe_domain_fallback(
                     },
                 )
             ],
+            duration_ms=result.duration_ms,
+        )
+    general_task = parse_general_browser_task(user_text)
+    if general_task is not None:
+        if general_task.missing_destination:
+            question = (
+                "What exact HTTP or HTTPS URL should I use to start that browser task?"
+            )
+            return RouterResult(
+                RouterResultType.CLARIFICATION,
+                message=question,
+                clarification=ClarificationRequest(
+                    question=question,
+                    intent="browser_copilot_task",
+                    collected_slots={
+                        "objective": general_task.objective,
+                        "profile": general_task.profile_id,
+                    },
+                    missing_slots=["initial_url"],
+                ),
+                expected_slot="initial_url",
+                duration_ms=result.duration_ms,
+            )
+        arguments: dict[str, object] = {
+            "objective": general_task.objective,
+            "profile": general_task.profile_id,
+        }
+        if general_task.service_name:
+            arguments["service"] = general_task.service_name
+        if general_task.initial_url:
+            arguments["initial_url"] = general_task.initial_url
+        return RouterResult(
+            RouterResultType.TOOL_CALLS,
+            tool_calls=[LocalToolCall("browser_copilot_task", arguments)],
+            duration_ms=result.duration_ms,
+        )
+    explicit_url = _extract_explicit_url(user_text)
+    if explicit_url and _looks_like_navigation_request(lowered):
+        return RouterResult(
+            RouterResultType.TOOL_CALLS,
+            tool_calls=[LocalToolCall("open_website", {"url": explicit_url})],
             duration_ms=result.duration_ms,
         )
     search_request = _parse_browser_search_request(
@@ -1048,6 +1085,9 @@ def _classify_clarification_reply(user_text: str, pending) -> Optional[Clarifica
     query = pending.collected_slots.get("query")
     if isinstance(query, str) and query.casefold() in normalized:
         supplied["query"] = query
+    url_match = re.search(r"https?://[^\s<>\"']+", user_text, re.I)
+    if url_match:
+        supplied["initial_url"] = url_match.group(0).rstrip(".,;:!?)")
 
     affirmation = bool(words & {"yes", "yeah", "yep", "correct", "right"}) or normalized in {
         "that's right",
@@ -1074,6 +1114,9 @@ def _classify_clarification_reply(user_text: str, pending) -> Optional[Clarifica
             supplied_slots=supplied,
         )
 
-    if _looks_like_navigation_request(normalized) or _looks_like_application_request(normalized):
+    if (
+        not supplied
+        and (_looks_like_navigation_request(normalized) or _looks_like_application_request(normalized))
+    ):
         return ClarificationReply(ClarificationReplyType.NEW_REQUEST)
     return None

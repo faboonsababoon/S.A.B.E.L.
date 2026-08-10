@@ -60,13 +60,14 @@ LOCAL_TOOLS: List[Dict[str, Any]] = [
     ),
     _tool(
         "browser_copilot_task",
-        "Run one validated browser action at a time and verify the requested YouTube channel destination. Use for requests to go to a named creator's YouTube channel.",
+        "Run a bounded multi-step browser task that must inspect and navigate a page. Do not use for a simple open or search. Provide either one reviewed service or an explicit user-supplied URL, never both.",
         {
             "objective": {"type": "string"},
             "service": {"type": "string"},
             "profile": {"type": "string"},
+            "initial_url": {"type": "string"},
         },
-        ["objective", "service", "profile"],
+        ["objective", "profile"],
     ),
     _tool(
         "stop_browser_task",
@@ -212,16 +213,16 @@ Use check_application_installed for questions about whether a named application 
 Use show_browser_profiles for connected Chrome profiles, stop_browser_task to stop browser control, and show_recent_browser_actions for the local browser audit summary.
 Use open_web_search for raw browser results and delegate_to_openai for current research, comparison, recommendation, or synthesis.
 For browser work, keep profile, provider, query, service, and tab context in separate fields. Profile and provider instructions are never part of a search query. Explicit values in the current user message override prior context. Google means web search unless the user explicitly says Google Chrome. YouTube means YouTube search when a query is present. Never reuse an old query or a previously used profile when the user names a new value.
-Use open_service for registered services with exact Personal/NYU routing. Use browser_copilot_task for a named YouTube channel, search_web for Google/Bing/DuckDuckGo, search_youtube for YouTube results, open_website only for an explicit URL, and open_spotify_search whenever the user asks to open, find, search for, or play named content on Spotify.
+Use open_service for a one-step registered-service homepage. Use browser_copilot_task only when the user asks SABEL to inspect and navigate a page over multiple steps; provide either a reviewed service or an explicit URL from the user's request. Use search_web for a one-step Google/Bing/DuckDuckGo search, search_youtube for one-step YouTube results, open_website only for a one-step explicit URL, and open_spotify_search whenever the user asks to open, find, search for, or play named content on Spotify.
 Use show_status for requests about SABEL's health or runtime status, including natural phrasings such as "show your status", "what is your status", "are you working normally", and "show SABEL status". Python generates the values.
 Examples: YouTube homepage -> open_service with service_name "youtube" and profile_id "personal"; Google search in NYU -> search_web with a clean query, search_engine "google", and profile_id "nyu"; YouTube search in Personal -> search_youtube with a clean query and profile_id "personal"; an explicit youtube.com URL -> open_website; emptying Trash -> empty_trash {}; inspecting Trash contents -> get_trash_status {}; a greeting -> normal friendly text; an ambiguous play request -> request_clarification with one concrete question.
 Never invent abilities, tools, shell commands, or hidden results. Do not reveal reasoning."""
 
 
-PENDING_SYSTEM_PROMPT = """You interpret replies while one destructive action is pending.
+PENDING_SYSTEM_PROMPT = """You interpret replies while one consequential action is pending.
 Return exactly one native tool call with an empty arguments object.
 Use confirm_pending_action for a clear contextual confirmation such as yes/do it, go ahead, proceed, I confirm, or permanently delete it.
-Use cancel_pending_action for no, cancel, never mind, stop, or instructions not to delete.
+Use cancel_pending_action for no, cancel, never mind, stop, or instructions not to perform it.
 Use explain_pending_action for questions about the warning, action, permanence, confirmation, or previous SABEL message.
 Use route_new_request for an unrelated command that should replace the pending action.
 Bare okay, maybe, or sure is uncertain: ask for a clearer confirmation in ordinary prose and keep the action pending.

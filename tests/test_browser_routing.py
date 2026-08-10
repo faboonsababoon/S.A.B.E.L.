@@ -3,6 +3,7 @@ import unittest
 from sabel.browser_models import BrowserSearchRequest, LastBrowserReference
 from sabel.browser_routing import (
     build_search_url,
+    parse_general_browser_task,
     parse_browser_search_request,
     validate_search_query,
     verify_search_url,
@@ -10,6 +11,36 @@ from sabel.browser_routing import (
 
 
 class BrowserSearchRoutingTests(unittest.TestCase):
+    def test_general_task_routing_is_distinct_from_simple_open_and_search(self):
+        self.assertIsNone(parse_general_browser_task("open YouTube"))
+        self.assertIsNone(
+            parse_general_browser_task("search green water bottles on Google")
+        )
+        youtube = parse_general_browser_task(
+            "Go to YouTube and find Veritasium's newest video."
+        )
+        self.assertEqual(youtube.service_name, "youtube")
+        self.assertEqual(youtube.profile_id, "personal")
+        nyu = parse_general_browser_task(
+            "Go to YouTube and find X on my NYU profile"
+        )
+        self.assertEqual(nyu.profile_id, "nyu")
+        docs = parse_general_browser_task(
+            "Go to https://docs.python.org/3/library/subprocess.html and find the subprocess.run section"
+        )
+        self.assertEqual(
+            docs.initial_url,
+            "https://docs.python.org/3/library/subprocess.html",
+        )
+
+    def test_unregistered_named_site_requires_exact_starting_url(self):
+        parsed = parse_general_browser_task(
+            "Search Best Buy for 2TB SSDs and tell me which visible option is cheapest"
+        )
+        self.assertTrue(parsed.missing_destination)
+        self.assertIsNone(parsed.service_name)
+        self.assertIsNone(parsed.initial_url)
+
     def reference(self, *, profile="nyu", provider="youtube", tab_id=17):
         return LastBrowserReference(
             profile_id=profile,

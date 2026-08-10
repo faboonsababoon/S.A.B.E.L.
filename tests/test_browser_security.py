@@ -10,6 +10,7 @@ from sabel.browser_security import (
     ExtensionOriginStore,
     SlidingWindowRateLimiter,
     domain_in_scope,
+    restricted_domain,
     validate_http_url,
 )
 
@@ -77,6 +78,9 @@ class BrowserSecurityTests(unittest.TestCase):
                     validate_http_url(unsafe)
         self.assertTrue(domain_in_scope("studio.youtube.com", {"youtube.com"}))
         self.assertFalse(domain_in_scope("youtube.example.com", {"youtube.com"}))
+        self.assertTrue(restricted_domain("secure.chase.com"))
+        self.assertTrue(restricted_domain("patient.example.edu"))
+        self.assertFalse(restricted_domain("docs.python.org"))
 
     def test_rate_limit_is_bounded(self):
         limiter = SlidingWindowRateLimiter(2, 10)

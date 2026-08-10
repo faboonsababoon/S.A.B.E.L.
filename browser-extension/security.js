@@ -1,7 +1,7 @@
 (function (root) {
   "use strict";
 
-  const SENSITIVE_TYPES = new Set(["password", "hidden"]);
+  const SENSITIVE_TYPES = new Set(["password", "hidden", "file"]);
   const SENSITIVE_AUTOCOMPLETE = /(?:cc-|current-password|new-password|one-time-code)/i;
   const SENSITIVE_NAME = /(?:password|passwd|credit.?card|card.?number|security.?code|cvv|cvc|mfa|one.?time.?code|otp|social.?security|ssn)/i;
   const RESTRICTED_SITE_LABEL = /(?:^|[.-])(?:bank|banking|checkout|clinic|credit|dashlane|health|hospital|lastpass|medical|mychart|patient|password|payment|paypal|venmo|wallet)(?:[.-]|$)/i;

@@ -13,7 +13,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.pending_action_ttl, 60.0)
         self.assertEqual(settings.clarification_ttl, 60.0)
         self.assertIsNone(settings.default_music_service)
-        self.assertEqual(settings.browser_max_actions, 8)
+        self.assertEqual(settings.browser_max_actions, 15)
 
     def test_environment_and_cli_override(self):
         settings = load_settings(

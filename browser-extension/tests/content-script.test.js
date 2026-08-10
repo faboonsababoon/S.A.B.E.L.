@@ -19,6 +19,7 @@ function fakeElement(values = {}) {
     disabled: Boolean(values.disabled),
     checked: Boolean(values.checked),
     selected: Boolean(values.selected),
+    options: values.options || [],
     value: values.value || "",
     isConnected: values.isConnected !== false,
     styleValues: values.styleValues || { display: "block", visibility: "visible", opacity: "1" },
@@ -119,4 +120,26 @@ test("download links carry filename metadata for Python confirmation policy", ()
   });
   const snapshot = harness([download]).controller.buildSnapshot(1);
   assert.equal(snapshot.interactive_elements[0].download, "setup.dmg");
+});
+
+test("select options are bounded structured data and file fields are omitted", () => {
+  const select = fakeElement({
+    tagName: "SELECT",
+    options: Array.from({ length: 40 }, (_, index) => ({
+      value: `value-${index}`,
+      textContent: `Option ${index}`,
+      selected: index === 2,
+      disabled: false
+    }))
+  });
+  const upload = fakeElement({ tagName: "INPUT", type: "file", name: "upload" });
+  const snapshot = harness([select, upload]).controller.buildSnapshot(1);
+  assert.equal(snapshot.interactive_elements.length, 1);
+  assert.equal(snapshot.interactive_elements[0].options.length, 30);
+  assert.deepEqual(snapshot.interactive_elements[0].options[2], {
+    value: "value-2",
+    label: "Option 2",
+    selected: true,
+    disabled: false
+  });
 });

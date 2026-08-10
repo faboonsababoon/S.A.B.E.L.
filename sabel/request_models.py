@@ -14,6 +14,7 @@ class Intent(Enum):
     SEARCH_WEB = "search_web"
     SEARCH_YOUTUBE = "search_youtube"
     OPEN_SPOTIFY_SEARCH = "open_spotify_search"
+    BROWSER_TASK = "browser_copilot_task"
     OTHER = "other"
 
 
@@ -61,6 +62,7 @@ class ResolvedRequest:
     profile_id: Optional[str] = None
     browser_name: Optional[str] = None
     target_tab_id: Optional[int] = None
+    initial_url: Optional[str] = None
     source_turn_id: Optional[str] = None
     raw_input: Optional[str] = None
     model_intent: Optional[str] = None

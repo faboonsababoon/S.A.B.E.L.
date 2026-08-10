@@ -251,31 +251,63 @@ class ToolDispatcher:
                 ),
             )
         if name == "browser_copilot_task":
-            if not _valid_keys(arguments, {"objective", "service", "profile"}):
+            if not _valid_keys(
+                arguments,
+                {"objective", "profile"},
+                {"service", "initial_url"},
+            ):
                 return DispatchResult("The browser-task arguments were rejected.")
             objective = arguments.get("objective")
             service = arguments.get("service")
             profile = arguments.get("profile")
-            if not all(isinstance(value, str) and value.strip() for value in (objective, service, profile)):
+            initial_url = arguments.get("initial_url")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (objective, profile)
+            ):
                 return DispatchResult("The browser-task arguments were rejected.")
+            if bool(isinstance(service, str) and service.strip()) == bool(
+                isinstance(initial_url, str) and initial_url.strip()
+            ):
+                return DispatchResult(
+                    "A browser task requires exactly one reviewed service or explicit URL."
+                )
             selected_profile = profile.strip().casefold()
             if selected_profile not in {"personal", "nyu"}:
                 return DispatchResult("The browser profile must be Personal or NYU.")
             validated = {
                 "objective": objective.strip(),
-                "service": service.strip().casefold(),
                 "profile": selected_profile,
             }
+            selected_service = None
+            selected_url = None
+            if isinstance(service, str) and service.strip():
+                selected_service = service.strip().casefold()
+                validated["service"] = selected_service
+            if isinstance(initial_url, str) and initial_url.strip():
+                from sabel.browser_security import BrowserSecurityError, validate_http_url
+
+                try:
+                    selected_url = validate_http_url(initial_url)
+                except BrowserSecurityError as error:
+                    return DispatchResult(str(error))
+                if selected_url not in user_text:
+                    return DispatchResult(
+                        "The browser task URL must be explicitly present in your request."
+                    )
+                validated["initial_url"] = selected_url
+            call_arguments = [
+                validated["objective"],
+                selected_service,
+                selected_profile,
+                approval_callback,
+            ]
+            if selected_url is not None:
+                call_arguments.append(selected_url)
             return self._browser_outcome(
                 name,
                 validated,
-                self._browser_call(
-                    "browser_copilot_task",
-                    validated["objective"],
-                    validated["service"],
-                    selected_profile,
-                    approval_callback,
-                ),
+                self._browser_call("browser_copilot_task", *call_arguments),
             )
         if name == "stop_browser_task":
             if arguments:
@@ -459,7 +491,8 @@ class ToolDispatcher:
                 return DispatchResult("The capabilities tool accepts no arguments.")
             return DispatchResult(
                 "I can use connected Personal and NYU Chrome profiles for reviewed services, "
-                "tab summaries, searches, and verified YouTube channel navigation; open websites "
+                "tab summaries, searches, verified YouTube channel navigation, and bounded "
+                "multi-step same-domain browser tasks; open websites "
                 "and installed apps; inspect the installed-app catalog; show status; "
                 "inspect Trash, open stored research sources, and empty Trash after explicit confirmation. "
                 "Complex current research can be delegated according to cloud mode.",
@@ -575,8 +608,11 @@ class ToolDispatcher:
                 False,
             )
 
-    @staticmethod
-    def _browser_outcome(name: str, validated: Dict[str, Any], outcome) -> DispatchResult:
+    def cancel_expired_browser_confirmation(self, task_id: object) -> None:
+        if isinstance(task_id, str) and task_id:
+            self._browser_call("cancel_pending_browser_task", task_id)
+
+    def _browser_outcome(self, name: str, validated: Dict[str, Any], outcome) -> DispatchResult:
         if outcome is None:
             return DispatchResult(
                 "Browser Copilot is unavailable because the local bridge is not running.",
@@ -593,6 +629,20 @@ class ToolDispatcher:
         }:
             return DispatchResult("SABEL rejected a malformed browser result.")
         clarification = getattr(outcome, "clarification", None)
+        confirmation_prompt = getattr(outcome, "confirmation_prompt", None)
+        task_id = getattr(outcome, "task_id", None)
+        if confirmation_prompt:
+            if not isinstance(task_id, str) or not task_id:
+                return DispatchResult("SABEL rejected malformed browser confirmation state.")
+            self.state.set_pending_destructive_action(
+                "confirm_browser_task",
+                {"task_id": task_id},
+                description=(
+                    "A browser task is paused before a consequential page action. "
+                    "Only the exact reviewed action stored by Python can run after confirmation."
+                ),
+                warning=str(confirmation_prompt),
+            )
         context = getattr(outcome, "context", None)
         if context is not None and not isinstance(context, BrowserActionContext):
             return DispatchResult("SABEL rejected malformed browser context.")
@@ -625,6 +675,16 @@ class ToolDispatcher:
                 "error_code": evidence.error_code,
                 "verification": "passed" if evidence.verified else "failed",
             }
+        clarification_missing = None
+        if clarification:
+            if name in {"open_service", "open_service_in_profile"}:
+                clarification_missing = ["profile"]
+            else:
+                clarification_missing = (
+                    ["initial_url"]
+                    if "service" not in slots and "initial_url" not in slots
+                    else ["browser_detail"]
+                )
         return DispatchResult(
             message,
             selected_tool=name,
@@ -634,7 +694,7 @@ class ToolDispatcher:
             verified=bool(getattr(outcome, "verified", False)),
             clarification_intent=name if clarification else None,
             clarification_slots=slots if clarification else None,
-            clarification_missing=["profile"] if clarification else None,
+            clarification_missing=clarification_missing,
             browser_context=context,
             browser_debug=browser_debug,
         )
@@ -661,28 +721,65 @@ class ToolDispatcher:
         if name == "cancel_pending_action":
             if arguments:
                 return DispatchResult("The cancellation tool accepts no arguments.")
+            if pending.tool_name == "confirm_browser_task":
+                task_id = pending.arguments.get("task_id")
+                outcome = self._browser_call(
+                    "cancel_pending_browser_task", task_id
+                )
+                self.state.clear_pending_destructive_action()
+                return self._browser_outcome(
+                    "browser_copilot_task",
+                    {"task_id": task_id},
+                    outcome,
+                )
             self.state.clear_pending_destructive_action()
             return DispatchResult("Trash emptying cancelled.", selected_tool=name, validated_arguments={})
         if name == "explain_pending_action":
             if arguments:
                 return DispatchResult("The explanation tool accepts no arguments.")
             return DispatchResult(
-                pending.description,
+                pending.warning if pending.tool_name == "confirm_browser_task" else pending.description,
                 selected_tool=name,
                 validated_arguments={},
             )
         if name == "route_new_request":
             if arguments:
                 return DispatchResult("The new-request tool accepts no arguments.")
+            if pending.tool_name == "confirm_browser_task":
+                self._browser_call(
+                    "cancel_pending_browser_task",
+                    pending.arguments.get("task_id"),
+                )
             self.state.clear_pending_destructive_action()
             return DispatchResult(
-                "Cancelled the pending Trash action.",
+                (
+                    "Cancelled the pending browser action."
+                    if pending.tool_name == "confirm_browser_task"
+                    else "Cancelled the pending Trash action."
+                ),
                 selected_tool=name,
                 validated_arguments={},
                 continue_with_new_request=True,
             )
         if name != "confirm_pending_action":
             return DispatchResult("SABEL rejected an unknown pending-action tool request.")
+
+        if pending.tool_name == "confirm_browser_task":
+            if arguments:
+                return DispatchResult(
+                    "The confirmation arguments were rejected; the pending browser action was not executed."
+                )
+            task_id = pending.arguments.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                self.state.clear_pending_destructive_action()
+                return DispatchResult("The stored browser action is no longer available.")
+            self.state.clear_pending_destructive_action()
+            outcome = self._browser_call("resume_browser_task", task_id)
+            return self._browser_outcome(
+                "browser_copilot_task",
+                {"task_id": task_id},
+                outcome,
+            )
 
         normalized = normalize_confirmation_arguments(arguments, pending.tool_name)
         if normalized is None:

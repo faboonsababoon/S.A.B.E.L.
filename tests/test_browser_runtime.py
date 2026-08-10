@@ -42,7 +42,7 @@ class BrowserRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transport = FakeTransport()
             runtime = BrowserBridgeRuntime(self.settings(directory), transport)
-            self.assertEqual(runtime.copilot.task_manager.max_steps, 8)
+            self.assertEqual(runtime.copilot.task_manager.max_steps, 15)
             runtime.start()
             self.assertTrue(transport.started)
             self.assertIn("Personal", runtime.show_profiles().message)

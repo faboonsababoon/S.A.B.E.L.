@@ -236,6 +236,7 @@ class ConversationState:
             Intent.OPEN_SERVICE,
             Intent.SEARCH_WEB,
             Intent.SEARCH_YOUTUBE,
+            Intent.BROWSER_TASK,
         }
         accepted_success = success and (verified if browser_intent else True)
         status = ActionResultStatus.VERIFIED if accepted_success else ActionResultStatus.FAILED

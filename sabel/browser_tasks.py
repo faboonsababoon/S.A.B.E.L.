@@ -47,7 +47,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 class BrowserTaskManager:
-    def __init__(self, max_steps: int = 8, step_extension: int = 5) -> None:
+    def __init__(self, max_steps: int = 15, step_extension: int = 5) -> None:
         self.max_steps = max_steps
         self.step_extension = step_extension
         self.current_tasks_by_profile: dict[str, BrowserTask] = {}
@@ -69,6 +69,9 @@ class BrowserTaskManager:
         profile_id: str,
         allowed_domains: Iterable[str],
         allowed_actions: Optional[Iterable[str]] = None,
+        *,
+        initial_url: Optional[str] = None,
+        initial_service: Optional[str] = None,
     ) -> BrowserTask:
         task = BrowserTask(
             task_id=f"browser-task-{uuid.uuid4().hex}",
@@ -78,6 +81,8 @@ class BrowserTaskManager:
             allowed_domains={domain.casefold().rstrip(".") for domain in allowed_domains},
             allowed_actions=set(allowed_actions or DEFAULT_BROWSER_ACTIONS),
             allowed_profiles={profile_id},
+            initial_url=initial_url,
+            initial_service=initial_service,
             max_steps=self.max_steps,
         )
         self.current_tasks_by_profile[profile_id] = task

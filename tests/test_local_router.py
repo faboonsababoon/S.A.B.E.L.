@@ -428,6 +428,57 @@ class LocalRouterTests(unittest.TestCase):
         )
         self.assertEqual(result.tool_calls, [expected])
 
+    def test_general_browser_goal_routes_to_agent_but_simple_open_stays_direct(self):
+        client = Mock()
+        client.chat.return_value = OllamaResponse("model prose", [], 1.0)
+        router = LocalRouter(client, ConversationState(10))
+        general = router.route(
+            "Go to YouTube and find Veritasium's newest video on my NYU profile"
+        )
+        simple = router.route("Open YouTube")
+        self.assertEqual(
+            general.tool_calls,
+            [
+                LocalToolCall(
+                    "browser_copilot_task",
+                    {
+                        "objective": "Go to YouTube and find Veritasium's newest video on my NYU profile",
+                        "service": "youtube",
+                        "profile": "nyu",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(
+            simple.tool_calls,
+            [
+                LocalToolCall(
+                    "open_service",
+                    {"service_name": "youtube", "profile_id": "personal"},
+                )
+            ],
+        )
+
+    def test_generic_explicit_url_task_keeps_user_url_and_profile_separate(self):
+        client = Mock()
+        client.chat.return_value = OllamaResponse("model prose", [], 1.0)
+        result = LocalRouter(client, ConversationState(10)).route(
+            "Go to https://docs.python.org/3/library/subprocess.html and find the subprocess.run section in Personal"
+        )
+        self.assertEqual(
+            result.tool_calls,
+            [
+                LocalToolCall(
+                    "browser_copilot_task",
+                    {
+                        "objective": "Go to https://docs.python.org/3/library/subprocess.html and find the subprocess.run section in Personal",
+                        "profile": "personal",
+                        "initial_url": "https://docs.python.org/3/library/subprocess.html",
+                    },
+                )
+            ],
+        )
+
     def test_profile_services_and_browser_commands_are_high_level_tools(self):
         cases = [
             (

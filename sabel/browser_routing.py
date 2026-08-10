@@ -6,6 +6,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from sabel.browser_models import LastBrowserReference
+from sabel.services import resolve_profile_service, service_mentioned
 
 
 PROFILE_IDS = frozenset({"personal", "nyu"})
@@ -93,6 +94,103 @@ class ParsedBrowserSearch:
     references_context: bool = False
     missing_context: Optional[str] = None
     routing_conflict: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParsedGeneralBrowserTask:
+    objective: str
+    profile_id: str
+    service_name: Optional[str] = None
+    initial_url: Optional[str] = None
+    missing_destination: bool = False
+
+
+_EXPLICIT_HTTP_URL = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+
+def parse_general_browser_task(text: str) -> Optional[ParsedGeneralBrowserTask]:
+    """Recognize page-observation goals while leaving one-step opens/searches alone."""
+    cleaned = " ".join(text.strip().split())
+    if not cleaned or len(cleaned) > 1000:
+        return None
+    # Preserve the existing deterministic specialized channel workflow.
+    if re.fullmatch(
+        r"(?:(?:open|go to|take me to|navigate to|pull up)\s+)?"
+        r".+?(?:['’]s)?\s+youtube\s+channel[.!?]?",
+        cleaned,
+        re.I,
+    ):
+        return None
+    multi_step = bool(
+        re.search(
+            r"\b(?:and|then)\b.{0,160}\b(?:find|locate|navigate|identify|compare|tell|show)\b",
+            cleaned,
+            re.I,
+        )
+        or re.search(
+            r"\b(?:find|locate)\b.{0,180}\b(?:documentation|docs|section|repository|"
+            r"schedule|newest|latest|cheapest|lowest|option|video|channel)\b",
+            cleaned,
+            re.I,
+        )
+        or re.search(
+            r"\bsearch\b.{0,180}\b(?:and\s+(?:tell|compare|identify)|which\s+(?:visible\s+)?option)\b",
+            cleaned,
+            re.I,
+        )
+    )
+    if not multi_step:
+        return None
+
+    profiles = {
+        item.casefold()
+        for item in re.findall(
+            r"(?<![a-z0-9])(personal|nyu)(?![a-z0-9])", cleaned, re.I
+        )
+    }
+    if len(profiles) > 1:
+        return None
+    explicit_profile = next(iter(profiles)) if profiles else None
+    url_match = _EXPLICIT_HTTP_URL.search(cleaned)
+    initial_url = url_match.group(0).rstrip(".,;:!?)") if url_match else None
+    mentioned = service_mentioned(cleaned)
+    service_name = mentioned[0] if mentioned else None
+    default_profile = mentioned[1].default_profile if mentioned else None
+    profile_id = explicit_profile or default_profile or "personal"
+
+    if initial_url is not None:
+        return ParsedGeneralBrowserTask(
+            objective=cleaned,
+            profile_id=profile_id,
+            initial_url=initial_url,
+        )
+    if service_name is not None:
+        resolution = resolve_profile_service(service_name)
+        profile_id = explicit_profile or (
+            resolution.service.default_profile
+            if resolution.service and resolution.service.default_profile
+            else profile_id
+        )
+        return ParsedGeneralBrowserTask(
+            objective=cleaned,
+            profile_id=profile_id,
+            service_name=service_name,
+        )
+    # A general information-finding goal can begin at the reviewed Google
+    # service. A named but unregistered website still requires its exact URL.
+    if re.search(r"\b(?:documentation|docs)\b", cleaned, re.I) and not re.search(
+        r"\b(?:this|that|the)\s+(?:documentation\s+)?site\b", cleaned, re.I
+    ):
+        return ParsedGeneralBrowserTask(
+            objective=cleaned,
+            profile_id=profile_id,
+            service_name="google",
+        )
+    return ParsedGeneralBrowserTask(
+        objective=cleaned,
+        profile_id=profile_id,
+        missing_destination=True,
+    )
 
 
 def normalize_search_engine(value: object) -> Optional[str]:

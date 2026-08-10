@@ -2,6 +2,8 @@
 
 import asyncio
 from dataclasses import dataclass, replace
+import hashlib
+import json
 import re
 from typing import Callable, Optional, Protocol
 from urllib.parse import quote_plus
@@ -10,13 +12,17 @@ import uuid
 from sabel.browser_models import (
     BrowserActionContext,
     BrowserActionState,
+    BrowserDecision,
+    BrowserDecisionAction,
     BrowserProfile,
     BrowserResult,
     BrowserSearchRequest,
     BrowserTask,
     BrowserTaskStatus,
+    PendingBrowserAction,
     ProfileBrowserState,
 )
+from sabel.browser_planner import BrowserPlannerError
 from sabel.browser_routing import (
     SEARCH_PROVIDER_URLS,
     WEB_SEARCH_ENGINES,
@@ -36,6 +42,8 @@ from sabel.browser_security import (
     BrowserSecurityError,
     domain_in_scope,
     normalized_domain,
+    restricted_domain,
+    validate_http_url,
 )
 from sabel.browser_tasks import BrowserAuditLog, BrowserTaskManager
 from sabel.browser_transport import BrowserTransport
@@ -60,7 +68,7 @@ class BrowserOutcome:
 class BrowserPlanner(Protocol):
     def next_action(
         self, task: BrowserTask, snapshot: dict[str, object]
-    ) -> Optional[BrowserActionProposal]: ...
+    ) -> BrowserDecision: ...
 
 
 class YouTubeChannelPlanner:
@@ -114,6 +122,7 @@ class BrowserCopilot:
         audit_log: Optional[BrowserAuditLog] = None,
         albert_url: Optional[str] = None,
         default_gmail_profile: Optional[str] = None,
+        planner: Optional[BrowserPlanner] = None,
     ) -> None:
         self.transport = transport
         self.task_manager = task_manager or BrowserTaskManager()
@@ -121,6 +130,7 @@ class BrowserCopilot:
         self.audit_log = audit_log or BrowserAuditLog()
         self.albert_url = albert_url
         self.default_gmail_profile = default_gmail_profile
+        self.planner = planner
         self.browser_state_by_profile: dict[str, ProfileBrowserState] = {}
 
     def connected_profiles(self) -> list[BrowserProfile]:
@@ -340,6 +350,481 @@ class BrowserCopilot:
             "Browser search supports YouTube, Google, Bing, and DuckDuckGo.",
             False,
         )
+
+    async def run_browser_task(
+        self,
+        objective: str,
+        profile_id: str,
+        *,
+        service_name: Optional[str] = None,
+        initial_url: Optional[str] = None,
+    ) -> BrowserOutcome:
+        """Run a bounded observe–plan–validate–act loop in one exact profile."""
+        goal = " ".join(objective.strip().split())
+        if not goal or len(goal) > 1000:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "Please provide a browser task under 1,000 characters.",
+                False,
+            )
+        selected_profile = profile_id.strip().casefold()
+        if selected_profile not in {"personal", "nyu"}:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser profile must be Personal or NYU.",
+                False,
+            )
+        if self.planner is None:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The local browser planner is unavailable.",
+                False,
+            )
+        if bool(service_name) == bool(initial_url):
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "A browser task requires exactly one reviewed service or explicit HTTP/HTTPS URL.",
+                False,
+            )
+
+        service_key = None
+        display_name = "the requested site"
+        if service_name:
+            resolution = resolve_profile_service(
+                service_name,
+                albert_url=self.albert_url,
+                default_gmail_profile=selected_profile,
+            )
+            service = resolution.service
+            if resolution.clarification:
+                return BrowserOutcome(
+                    BrowserActionState.PLANNED,
+                    resolution.clarification,
+                    False,
+                    clarification=resolution.clarification,
+                )
+            if service is None:
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    "I do not recognize that browser service. Provide an explicit HTTP or HTTPS URL instead.",
+                    False,
+                )
+            if not service.url:
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    "Albert is not configured yet. Set SABEL_ALBERT_URL to its exact HTTPS address.",
+                    False,
+                )
+            if (
+                resolution.service_name in {"albert", "nyu_gmail", "personal_gmail"}
+                and selected_profile != service.default_profile
+            ):
+                required = "NYU" if service.default_profile == "nyu" else "Personal"
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    f"{service.display_name} is assigned to the {required} browser profile; SABEL will not substitute another profile.",
+                    False,
+                )
+            selected_url = service.url
+            service_key = resolution.service_name
+            display_name = service.display_name
+            allowed_domains = set(service.allowed_domains)
+        else:
+            try:
+                selected_url = validate_http_url(initial_url)
+            except BrowserSecurityError as error:
+                return BrowserOutcome(BrowserActionState.FAILED, str(error), False)
+            allowed_domains = {normalized_domain(selected_url)}
+
+        try:
+            initial_domain = normalized_domain(selected_url)
+        except BrowserSecurityError as error:
+            return BrowserOutcome(BrowserActionState.FAILED, str(error), False)
+        if restricted_domain(initial_domain):
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "That domain is outside SABEL's permitted browser scope.",
+                False,
+            )
+        allowed_domains.add(initial_domain)
+        disconnected = self._disconnected_profile(selected_profile)
+        if disconnected:
+            return disconnected
+
+        task = self.task_manager.create(
+            objective,
+            goal,
+            selected_profile,
+            allowed_domains,
+            initial_url=selected_url,
+            initial_service=service_key,
+        )
+        opened = await self._execute(
+            task,
+            BrowserActionProposal(
+                "browser_open_tab",
+                {"url": selected_url, "active": True},
+                f"open {display_name}",
+                f"{display_name} opens in the requested profile",
+            ),
+            count_step=False,
+        )
+        if isinstance(opened, BrowserOutcome):
+            return opened
+        task.current_tab_id = self._tab_id(opened)
+        if task.current_tab_id is None:
+            task.status = BrowserTaskStatus.FAILED
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "The browser did not return a usable tab for that task.",
+                False,
+                task_id=task.task_id,
+            )
+        return await self._run_agent_loop(task)
+
+    async def resume_browser_task(self, task_id: str) -> BrowserOutcome:
+        """Execute only the exact Python-stored action after central confirmation."""
+        task = next(
+            (
+                item
+                for item in self.task_manager.current_tasks_by_profile.values()
+                if item.task_id == task_id
+            ),
+            None,
+        )
+        if task is None or task.pending_action is None:
+            return BrowserOutcome(
+                BrowserActionState.FAILED,
+                "That pending browser action is no longer available.",
+                False,
+            )
+        pending = task.pending_action
+        proposal = self._proposal_from_decision(task, pending.decision, pending.snapshot)
+        task.pending_action = None
+        result = await self._execute(
+            task,
+            proposal,
+            snapshot=pending.snapshot,
+            confirmed=True,
+        )
+        if isinstance(result, BrowserOutcome):
+            return result
+        self._record_agent_action(task, pending.decision, pending.snapshot)
+        self._update_task_tab(task, result)
+        return await self._run_agent_loop(task)
+
+    def cancel_pending_browser_task(self, task_id: str) -> BrowserOutcome:
+        task = next(
+            (
+                item
+                for item in self.task_manager.current_tasks_by_profile.values()
+                if item.task_id == task_id
+            ),
+            None,
+        )
+        if task is None:
+            return BrowserOutcome(
+                BrowserActionState.CANCELLED,
+                "That browser task is no longer active.",
+                True,
+            )
+        task.pending_action = None
+        self.task_manager.stop(task)
+        return BrowserOutcome(
+            BrowserActionState.CANCELLED,
+            "Browser action cancelled. No page action was performed.",
+            True,
+            task_id=task_id,
+        )
+
+    async def _run_agent_loop(self, task: BrowserTask) -> BrowserOutcome:
+        while task.step_count < task.max_steps:
+            page = await self._snapshot(task)
+            if isinstance(page, BrowserOutcome):
+                return page
+            fingerprint = self._snapshot_fingerprint(page)
+            try:
+                decision = self.planner.next_action(task, page) if self.planner else None
+            except BrowserPlannerError as error:
+                task.status = BrowserTaskStatus.FAILED
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    f"I could not safely parse the local browser planner's decision: {error}",
+                    False,
+                    task_id=task.task_id,
+                )
+            except Exception:
+                task.status = BrowserTaskStatus.FAILED
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    "The local browser planner failed before any new page action was performed.",
+                    False,
+                    task_id=task.task_id,
+                )
+            if not isinstance(decision, BrowserDecision):
+                task.status = BrowserTaskStatus.FAILED
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    "The local browser planner returned a malformed decision.",
+                    False,
+                    task_id=task.task_id,
+                )
+            if decision.action == BrowserDecisionAction.DONE:
+                if not self._completion_verified(decision, page):
+                    task.status = BrowserTaskStatus.FAILED
+                    return BrowserOutcome(
+                        BrowserActionState.FAILED,
+                        "The browser planner claimed completion without enough current page evidence, so I did not report success.",
+                        False,
+                        task_id=task.task_id,
+                    )
+                task.status = BrowserTaskStatus.VERIFIED
+                context = BrowserActionContext(
+                    profile_id=task.profile_id,
+                    service=task.initial_service,
+                    tab_id=task.current_tab_id,
+                    url=str(page.get("url") or ""),
+                )
+                self._update_profile_state(context, "browser_task")
+                return BrowserOutcome(
+                    BrowserActionState.VERIFIED,
+                    decision.answer or "Browser task completed.",
+                    True,
+                    True,
+                    task.task_id,
+                    context=context,
+                )
+            if decision.action == BrowserDecisionAction.CLARIFY:
+                task.status = BrowserTaskStatus.CLARIFICATION_REQUIRED
+                return BrowserOutcome(
+                    BrowserActionState.PLANNED,
+                    decision.question or "I need more information to continue that browser task.",
+                    False,
+                    task_id=task.task_id,
+                    clarification=decision.question,
+                )
+
+            signature = self._decision_signature(decision, page)
+            if (
+                task.last_action_signature == signature
+                and task.last_snapshot_fingerprint == fingerprint
+            ):
+                task.no_progress_count += 1
+            else:
+                task.no_progress_count = 0
+            if task.no_progress_count >= task.max_no_progress:
+                task.status = BrowserTaskStatus.FAILED
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    "I stopped because the browser task repeated the same action without page progress.",
+                    False,
+                    task_id=task.task_id,
+                )
+
+            try:
+                proposal = self._proposal_from_decision(task, decision, page)
+            except BrowserPlannerError as error:
+                task.status = BrowserTaskStatus.FAILED
+                return BrowserOutcome(
+                    BrowserActionState.FAILED,
+                    f"I could not safely execute the browser planner's decision: {error}",
+                    False,
+                    task_id=task.task_id,
+                )
+            result = await self._execute(task, proposal, snapshot=page)
+            if isinstance(result, BrowserOutcome):
+                if result.confirmation_prompt:
+                    task.pending_action = PendingBrowserAction(
+                        decision=decision,
+                        snapshot=page,
+                        prompt=result.confirmation_prompt,
+                    )
+                return result
+            self._record_agent_action(task, decision, page)
+            self._update_task_tab(task, result)
+            if decision.action in {
+                BrowserDecisionAction.CLICK,
+                BrowserDecisionAction.NAVIGATE,
+                BrowserDecisionAction.OPEN_TAB,
+                BrowserDecisionAction.BACK,
+                BrowserDecisionAction.PRESS_KEY,
+            }:
+                await asyncio.sleep(0.1)
+
+        task.status = BrowserTaskStatus.STEP_LIMIT_REACHED
+        return BrowserOutcome(
+            BrowserActionState.FAILED,
+            "I couldn't complete that browser task within the allowed number of steps.",
+            False,
+            task_id=task.task_id,
+        )
+
+    def _proposal_from_decision(
+        self,
+        task: BrowserTask,
+        decision: BrowserDecision,
+        snapshot: dict[str, object],
+    ) -> BrowserActionProposal:
+        selected = (
+            decision.requested_action
+            if decision.action == BrowserDecisionAction.REQUEST_CONFIRMATION
+            else decision.action
+        )
+        tab_id = task.current_tab_id
+        if tab_id is None or selected is None:
+            raise BrowserPlannerError("The browser task has no current action target.")
+        arguments: dict[str, object]
+        action_map = {
+            BrowserDecisionAction.CLICK: "browser_click",
+            BrowserDecisionAction.TYPE: "browser_type",
+            BrowserDecisionAction.SELECT: "browser_select",
+            BrowserDecisionAction.SCROLL: "browser_scroll",
+            BrowserDecisionAction.PRESS_KEY: "browser_press_key",
+            BrowserDecisionAction.NAVIGATE: "browser_navigate",
+            BrowserDecisionAction.BACK: "browser_go_back",
+            BrowserDecisionAction.OPEN_TAB: "browser_open_tab",
+        }
+        if selected not in action_map:
+            raise BrowserPlannerError("That planner decision cannot execute a browser action.")
+        if selected in {
+            BrowserDecisionAction.CLICK,
+            BrowserDecisionAction.TYPE,
+            BrowserDecisionAction.SELECT,
+        }:
+            arguments = {
+                "tab_id": tab_id,
+                "snapshot_id": str(snapshot["snapshot_id"]),
+                "element_id": str(decision.element_ref),
+            }
+            if selected == BrowserDecisionAction.TYPE:
+                arguments.update({"text": str(decision.text), "clear": True})
+            elif selected == BrowserDecisionAction.SELECT:
+                arguments["value"] = str(decision.value)
+        elif selected == BrowserDecisionAction.SCROLL:
+            arguments = {"tab_id": tab_id, "delta_y": int(decision.delta_y or 0)}
+        elif selected == BrowserDecisionAction.PRESS_KEY:
+            arguments = {"tab_id": tab_id, "key": str(decision.key)}
+        elif selected == BrowserDecisionAction.NAVIGATE:
+            arguments = {"tab_id": tab_id, "url": str(decision.url)}
+        elif selected == BrowserDecisionAction.OPEN_TAB:
+            arguments = {"url": str(decision.url), "active": True}
+        else:
+            arguments = {"tab_id": tab_id}
+        return BrowserActionProposal(
+            action=action_map[selected],
+            arguments=arguments,
+            reason=decision.reason,
+            expected_result=decision.expected_result,
+            external_effect=(
+                decision.action == BrowserDecisionAction.REQUEST_CONFIRMATION
+            ),
+        )
+
+    @staticmethod
+    def _completion_verified(
+        decision: BrowserDecision, snapshot: dict[str, object]
+    ) -> bool:
+        if not decision.answer or not decision.evidence:
+            return False
+        corpus = " ".join(
+            str(snapshot.get(key) or "")
+            for key in ("url", "title", "visible_text_summary")
+        )
+        corpus = " ".join(corpus.casefold().split())
+        evidence = [" ".join(item.casefold().split()) for item in decision.evidence]
+        return bool(evidence) and all(
+            len(item) >= 3 and item in corpus for item in evidence
+        )
+
+    @staticmethod
+    def _snapshot_fingerprint(snapshot: dict[str, object]) -> str:
+        elements = []
+        for item in snapshot.get("interactive_elements", []):
+            if isinstance(item, dict):
+                elements.append(
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "role",
+                            "tag",
+                            "visible_text",
+                            "accessible_name",
+                            "href",
+                            "disabled",
+                            "checked",
+                            "selected",
+                        )
+                    }
+                )
+        value = {
+            "url": snapshot.get("url"),
+            "title": snapshot.get("title"),
+            "visible_text_summary": snapshot.get("visible_text_summary"),
+            "interactive_elements": elements,
+        }
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _decision_signature(
+        decision: BrowserDecision,
+        snapshot: Optional[dict[str, object]] = None,
+    ) -> str:
+        element_signature = None
+        if decision.element_ref and snapshot is not None:
+            element_signature = next(
+                (
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "role",
+                            "tag",
+                            "visible_text",
+                            "accessible_name",
+                            "input_type",
+                            "href",
+                        )
+                    }
+                    for item in snapshot.get("interactive_elements", [])
+                    if isinstance(item, dict)
+                    and item.get("element_id") == decision.element_ref
+                ),
+                None,
+            )
+        return json.dumps(
+            {
+                "action": decision.action.value,
+                "requested_action": (
+                    decision.requested_action.value
+                    if decision.requested_action is not None
+                    else None
+                ),
+                "element": element_signature or decision.element_ref,
+                "text": decision.text,
+                "url": decision.url,
+                "value": decision.value,
+                "key": decision.key,
+                "delta_y": decision.delta_y,
+            },
+            sort_keys=True,
+        )
+
+    def _record_agent_action(
+        self,
+        task: BrowserTask,
+        decision: BrowserDecision,
+        snapshot: dict[str, object],
+    ) -> None:
+        task.last_action_signature = self._decision_signature(decision, snapshot)
+        task.last_snapshot_fingerprint = self._snapshot_fingerprint(snapshot)
+        task.recent_actions.append(
+            f"{decision.action.value}: {decision.reason[:160]}"
+        )
+        task.recent_actions[:] = task.recent_actions[-5:]
+
+    def _update_task_tab(self, task: BrowserTask, result: BrowserResult) -> None:
+        task.current_tab_id = self._tab_id(result) or task.current_tab_id
 
     async def _search(
         self,
@@ -651,6 +1136,7 @@ class BrowserCopilot:
                 "observe the current page",
                 "a constrained page snapshot is returned",
             ),
+            count_step=False,
         )
         if isinstance(result, BrowserOutcome):
             return result
@@ -704,14 +1190,43 @@ class BrowserCopilot:
         *,
         snapshot: Optional[dict[str, object]] = None,
         approval_callback: Optional[Callable[[str], str]] = None,
+        confirmed: bool = False,
+        count_step: bool = True,
     ):
-        decision = self.policy.evaluate(task, proposal, snapshot)
-        confirmed = False
+        decision = self.policy.evaluate(
+            task, proposal, snapshot, confirmed=confirmed
+        )
         if decision.decision == PolicyDecisionType.REQUIRE_CONFIRMATION:
             task.status = BrowserTaskStatus.WAITING_FOR_CONFIRMATION
-            answer = approval_callback(decision.confirmation_prompt or "Continue? [y/N] ") if approval_callback else ""
+            if approval_callback is None:
+                self._audit(
+                    task,
+                    proposal,
+                    "paused",
+                    "pending",
+                    decision.decision.value,
+                    snapshot,
+                )
+                prompt = decision.confirmation_prompt or "Continue with that browser action?"
+                return BrowserOutcome(
+                    BrowserActionState.REQUESTED,
+                    prompt,
+                    False,
+                    task_id=task.task_id,
+                    confirmation_prompt=prompt,
+                )
+            answer = approval_callback(
+                decision.confirmation_prompt or "Continue? [y/N] "
+            )
             if answer.strip().casefold() not in {"y", "yes"}:
-                self._audit(task, proposal, "cancelled", "declined", decision.decision.value, snapshot)
+                self._audit(
+                    task,
+                    proposal,
+                    "cancelled",
+                    "declined",
+                    decision.decision.value,
+                    snapshot,
+                )
                 return BrowserOutcome(
                     BrowserActionState.CANCELLED,
                     "Browser action cancelled. No page action was performed.",
@@ -719,7 +1234,9 @@ class BrowserCopilot:
                     task_id=task.task_id,
                 )
             confirmed = True
-            decision = self.policy.evaluate(task, proposal, snapshot, confirmed=True)
+            decision = self.policy.evaluate(
+                task, proposal, snapshot, confirmed=True
+            )
         if decision.decision != PolicyDecisionType.ALLOW:
             self._audit(task, proposal, "rejected", "not_confirmed", decision.decision.value, snapshot)
             if decision.code == "STEP_LIMIT_REACHED":
@@ -737,13 +1254,15 @@ class BrowserCopilot:
                 False,
                 task_id=task.task_id,
             )
-        if not self.task_manager.record_step(task):
+        if count_step and not self.task_manager.record_step(task):
             return BrowserOutcome(
                 BrowserActionState.FAILED,
                 f"I have not verified the requested result after {task.max_steps} browser actions. Continue for another {self.task_manager.step_extension} actions or stop?",
                 False,
                 task_id=task.task_id,
             )
+        if not count_step:
+            task.status = BrowserTaskStatus.RUNNING
         result = await self.transport.send_request(
             task.profile_id, proposal.action, proposal.arguments
         )

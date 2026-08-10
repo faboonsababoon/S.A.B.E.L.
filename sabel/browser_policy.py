@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 import re
 from typing import Optional
 from urllib.parse import urlsplit
@@ -11,6 +12,7 @@ from sabel.browser_security import (
     BrowserSecurityError,
     domain_in_scope,
     normalized_domain,
+    restricted_domain,
 )
 
 
@@ -81,10 +83,16 @@ def browser_planner_context(
         f"USER OBJECTIVE\n{task.objective}\n\n"
         "CURRENT AUTHORIZED SCOPE\n"
         f"Profile: {task.profile_id}\nDomains: {sorted(task.allowed_domains)}\n"
-        f"Actions: {sorted(task.allowed_actions)}\n\n"
-        f"UNTRUSTED WEBPAGE DATA\n{page_data}\n\n"
+        f"Actions: {sorted(task.allowed_actions)}\n"
+        f"Step: {task.step_count + 1} / {task.max_steps}\n"
+        f"Recent actions: {task.recent_actions[-5:]}\n\n"
+        "UNTRUSTED WEBPAGE DATA (BEGIN)\n"
+        f"{json.dumps(page_data, ensure_ascii=True, sort_keys=True)}\n"
+        "UNTRUSTED WEBPAGE DATA (END)\n\n"
         f"AVAILABLE ACTIONS\n{available_actions}\n"
-        "Return one action, a brief task-relevant reason, and an expected result."
+        "Return exactly one native browser_next_action tool call. Element references "
+        "must come from this snapshot. DONE requires a concise answer plus literal "
+        "evidence visible in the current page state."
     )
 
 
@@ -97,7 +105,11 @@ class BrowserPolicy:
         *,
         confirmed: bool = False,
     ) -> PolicyDecision:
-        if task.step_count >= task.max_steps:
+        if (
+            task.step_count >= task.max_steps
+            and proposal.action
+            not in {"browser_get_snapshot", "browser_get_active_tab", "browser_list_tabs"}
+        ):
             return PolicyDecision(
                 PolicyDecisionType.REJECT,
                 "The autonomous browser action limit was reached.",
@@ -132,6 +144,12 @@ class BrowserPolicy:
                     "The browser unexpectedly left the authorized domains.",
                     code="UNEXPECTED_DOMAIN",
                 )
+            if restricted_domain(current_domain):
+                return PolicyDecision(
+                    PolicyDecisionType.REJECT,
+                    "That domain is outside SABEL's permitted browser scope.",
+                    code="RESTRICTED_DOMAIN",
+                )
 
         destination = proposal.arguments.get("url")
         if destination is not None:
@@ -146,6 +164,12 @@ class BrowserPolicy:
                     PolicyDecisionType.REJECT,
                     "The proposed destination is outside the user-authorized domains.",
                     code="DOMAIN_OUT_OF_SCOPE",
+                )
+            if restricted_domain(target_domain):
+                return PolicyDecision(
+                    PolicyDecisionType.REJECT,
+                    "That destination is outside SABEL's permitted browser scope.",
+                    code="RESTRICTED_DOMAIN",
                 )
 
         element = None

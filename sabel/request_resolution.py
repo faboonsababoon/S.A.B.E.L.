@@ -13,6 +13,7 @@ from sabel.application_catalog import ApplicationCatalog
 from sabel.browser_routing import (
     normalize_search_engine,
     parse_browser_search_request,
+    parse_general_browser_task,
     validate_search_query,
 )
 from sabel.conversation_state import ConversationState
@@ -208,6 +209,24 @@ class RequestResolver:
         media = self._media_request(text, locked, turn_id)
         if media is not None:
             return media
+
+        general_browser_task = parse_general_browser_task(text)
+        if general_browser_task is not None and not general_browser_task.missing_destination:
+            request = ResolvedRequest(
+                intent=Intent.BROWSER_TASK,
+                service=general_browser_task.service_name,
+                profile_id=locked.profile_id or general_browser_task.profile_id,
+                initial_url=general_browser_task.initial_url,
+                source_turn_id=turn_id,
+                raw_input=text,
+                model_intent=model_intent,
+                locked=locked,
+                resolution_trace=(
+                    "deterministic multi-step browser goal",
+                    "exact profile and initial destination locked by Python",
+                ),
+            )
+            return _decision_for(request)
 
         search = parse_browser_search_request(
             text,
@@ -485,6 +504,16 @@ def _decision_for(request: ResolvedRequest) -> ResolutionDecision:
         )
     if request.intent == Intent.OPEN_SPOTIFY_SEARCH:
         return ResolutionDecision(request, "open_spotify_search", {"query": request.query or ""})
+    if request.intent == Intent.BROWSER_TASK:
+        arguments: dict[str, object] = {
+            "objective": request.raw_input or "",
+            "profile": request.profile_id or "personal",
+        }
+        if request.service:
+            arguments["service"] = request.service
+        if request.initial_url:
+            arguments["initial_url"] = request.initial_url
+        return ResolutionDecision(request, "browser_copilot_task", arguments)
     return ResolutionDecision(request=request)
 
 

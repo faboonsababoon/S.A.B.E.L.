@@ -335,6 +335,89 @@ class ToolDispatcherTests(unittest.TestCase):
         self.assertIn("rejected", rejected.message)
         browser.browser_copilot_task.assert_not_called()
 
+    def test_browser_task_url_must_be_explicit_and_arguments_remain_high_level(self):
+        browser = Mock()
+        browser.browser_copilot_task.return_value = BrowserOutcome(
+            BrowserActionState.FAILED,
+            "not used",
+            False,
+        )
+        dispatcher = ToolDispatcher(
+            Settings(), self.state, lambda: True, self.handlers, browser
+        )
+        invented = dispatcher.dispatch(
+            "browser_copilot_task",
+            {
+                "objective": "find docs",
+                "profile": "personal",
+                "initial_url": "https://evil.example/",
+            },
+            "find docs",
+        )
+        unsafe = dispatcher.dispatch(
+            "browser_copilot_task",
+            {
+                "objective": "find docs",
+                "profile": "personal",
+                "initial_url": "javascript:alert(1)",
+            },
+            "go to javascript:alert(1)",
+        )
+        extra = dispatcher.dispatch(
+            "browser_copilot_task",
+            {
+                "objective": "find docs",
+                "profile": "personal",
+                "service": "google",
+                "selector": "#unsafe",
+            },
+            "find docs",
+        )
+        self.assertIn("explicitly present", invented.message)
+        self.assertIn("HTTP and HTTPS", unsafe.message)
+        self.assertIn("rejected", extra.message)
+        browser.browser_copilot_task.assert_not_called()
+
+    def test_browser_confirmation_uses_only_python_stored_task(self):
+        browser = Mock()
+        browser.browser_copilot_task.return_value = BrowserOutcome(
+            BrowserActionState.REQUESTED,
+            "SABEL is ready to submit changes. Perform this action?",
+            False,
+            task_id="browser-task-123",
+            confirmation_prompt="SABEL is ready to submit changes. Perform this action?",
+        )
+        browser.resume_browser_task.return_value = BrowserOutcome(
+            BrowserActionState.VERIFIED,
+            "The page shows that the changes were submitted.",
+            True,
+            True,
+            task_id="browser-task-123",
+        )
+        dispatcher = ToolDispatcher(
+            Settings(), self.state, lambda: True, self.handlers, browser
+        )
+        paused = dispatcher.dispatch(
+            "browser_copilot_task",
+            {
+                "objective": "Open GitHub and submit the reviewed change",
+                "service": "github",
+                "profile": "personal",
+            },
+            "Open GitHub and submit the reviewed change",
+        )
+        self.assertEqual(paused.action_state, "requested")
+        self.assertEqual(
+            self.state.pending_destructive_action.arguments,
+            {"task_id": "browser-task-123"},
+        )
+        resumed = dispatcher.dispatch_pending(
+            "confirm_pending_action", {}, "Yes, submit it"
+        )
+        self.assertTrue(resumed.verified)
+        browser.resume_browser_task.assert_called_once_with("browser-task-123")
+        self.assertIsNone(self.state.pending_destructive_action)
+
     def test_low_level_browser_commands_are_not_dispatchable(self):
         result = self.dispatcher.dispatch(
             "browser_click",

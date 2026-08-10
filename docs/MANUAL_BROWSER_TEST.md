@@ -1,4 +1,4 @@
-# SABEL Browser Copilot v1 — manual integration procedure
+# SABEL Browser Copilot — manual integration procedure
 
 This procedure is intentionally separate from automated tests because it opens
 real Chrome tabs and uses the Chrome profiles you configure. It does not require
@@ -64,7 +64,9 @@ python3 main.py --register-extension-id YOUR_32_LETTER_EXTENSION_ID
 
 8. Open **SABEL Browser Copilot → Details → Extension options**.
 9. Choose profile ID `personal`, display name `Personal`, and port `8765`.
-10. Put `youtube.com` and `google.com` in Allowed sites.
+10. Put `youtube.com` and `google.com` in Allowed sites. Add `github.com` or
+    `docs.python.org` only when you intend to run the general-agent examples;
+    Chrome will request those domain-specific permissions.
 11. Copy the token without displaying it, paste it into the password field, and
     save/approve Chrome's requested site permissions:
 
@@ -257,6 +259,42 @@ SABEL > show recent browser actions
 
 Confirm it contains time/profile/domain/action outcome information but no token,
 typed values, page text, cookies, passwords, or MFA codes.
+
+### General multi-step agent checks
+
+First confirm that a simple command stays on the deterministic one-step path:
+
+```text
+SABEL > open YouTube
+```
+
+It should open YouTube directly and must not begin page inspection. Then try a
+multi-step request on the same allowed domain:
+
+```text
+SABEL > go to YouTube and find Veritasium's newest visible video
+```
+
+SABEL should repeatedly take a fresh bounded snapshot, choose one structured
+action, validate and execute it, then observe again. It may report success only
+when the final current snapshot contains the evidence named in its answer. A
+missing element, changed page, malformed planner decision, or unsupported task
+must produce a truthful failure instead.
+
+If `docs.python.org` is in the Personal extension's Allowed sites and Chrome
+permission was granted, also try:
+
+```text
+SABEL > go to https://docs.python.org/3/library/subprocess.html and find the subprocess.run section in Personal
+```
+
+This tests the general loop without the specialized YouTube workflow. For an
+unregistered named website, SABEL asks for an exact HTTP/HTTPS starting URL. It
+does not infer an arbitrary domain or broaden a task from Google results.
+
+Repeat a harmless task with `on my NYU profile` and verify every opened tab and
+action remains in NYU. Disconnect NYU and retry; SABEL must fail instead of
+using Personal.
 
 ## 9. Verify policy boundaries safely
 

@@ -15,6 +15,21 @@ from urllib.parse import urlsplit
 
 EXTENSION_ID_PATTERN = re.compile(r"^[a-p]{32}$")
 PROFILE_IDS = {"personal", "nyu"}
+RESTRICTED_DOMAIN_PATTERN = re.compile(
+    r"(?:^|[.-])(?:bank|banking|checkout|clinic|credit|dashlane|health|hospital|"
+    r"lastpass|medical|mychart|patient|password|payment|paypal|venmo|wallet)(?:[.-]|$)",
+    re.IGNORECASE,
+)
+RESTRICTED_DOMAINS = {
+    "1password.com",
+    "bitwarden.com",
+    "chase.com",
+    "bankofamerica.com",
+    "wellsfargo.com",
+    "citi.com",
+    "capitalone.com",
+    "stripe.com",
+}
 
 
 class BrowserSecurityError(RuntimeError):
@@ -227,4 +242,15 @@ def domain_in_scope(domain: str, allowed_domains: set[str]) -> bool:
         normalized == allowed.casefold().rstrip(".")
         or normalized.endswith("." + allowed.casefold().rstrip("."))
         for allowed in allowed_domains
+    )
+
+
+def restricted_domain(domain: object) -> bool:
+    """Mirror the extension's reviewed sensitive-site exclusion in Python."""
+    if not isinstance(domain, str):
+        return True
+    normalized = domain.casefold().rstrip(".")
+    return bool(RESTRICTED_DOMAIN_PATTERN.search(normalized)) or any(
+        normalized == blocked or normalized.endswith("." + blocked)
+        for blocked in RESTRICTED_DOMAINS
     )
